@@ -37,3 +37,12 @@ BEG_FUNC(LoadViewportScale)
 	lqc2 	VP_S, 0x00($a0)
 END_FUNC(LoadViewportScale)
 
+// Loads fog calculation factors into VU0 registers
+//	$a0 = addresss of factors (scale, bias, max)
+BEG_FUNC(LoadFogFactors)
+	lqc2 	FOG_S, 0x00($a0)
+	lqc2 	FOG_B, 0x10($a0)
+	jr		$ra
+	lqc2 	FOG_M, 0x20($a0)
+END_FUNC(LoadFogFactors)
+

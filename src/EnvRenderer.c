@@ -409,7 +409,9 @@ static int CalcRainHeightAt(int x, int maxY, int z, int hIndex) {
 	int i = World_Pack(x, maxY, z), y;
 	cc_uint8 draw;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	RainCalcBody(World_GetBlock(x, y, z));
+#elif !defined EXTENDED_BLOCKS
 	RainCalcBody(World.Blocks[i]);
 #else
 	if (World.IDMask <= 0xFF) {

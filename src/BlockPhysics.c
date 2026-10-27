@@ -100,6 +100,12 @@ static struct TickQueue lavaQ, waterQ;
 #define PHYSICS_LAVA_DELAY (30U << PHYSICS_DELAY_SHIFT)
 #define PHYSICS_WATER_DELAY (5U << PHYSICS_DELAY_SHIFT)
 
+#ifdef CC_BUILD_COMPACTMAP
+#define Physics_GetBlock(index) World_GetBlockAt(index)
+#else
+#define Physics_GetBlock(index) World.Blocks[index]
+#endif
+
 static void Physics_OnNewMapLoaded(void* obj) {
 	TickQueue_Clear(&lavaQ);
 	TickQueue_Clear(&waterQ);
@@ -108,7 +114,7 @@ static void Physics_OnNewMapLoaded(void* obj) {
 	physics_maxWaterY = World.MaxY - 2;
 	physics_maxWaterZ = World.MaxZ - 2;
 
-	Tree_Blocks = World.Blocks;
+	Tree_Blocks = World.Blocks; /* NULL with CC_BUILD_COMPACTMAP */
 	Random_SeedFromCurrentTime(&physics_rnd);
 	Tree_Rnd = &physics_rnd;
 }
@@ -119,7 +125,7 @@ void Physics_SetEnabled(cc_bool enabled) {
 }
 
 static void Physics_Activate(int index) {
-	BlockID block = World.Blocks[index];
+	BlockID block = Physics_GetBlock(index);
 	PhysicsHandler activate = Physics.OnActivate[block];
 	if (activate) activate(index, block);
 }
@@ -181,17 +187,17 @@ static void Physics_TickRandomBlocks(void) {
 				hi = World_Pack(x2, y2, z2);
 				
 				index = Random_Range(&physics_rnd, lo, hi);
-				block = World.Blocks[index];
+				block = Physics_GetBlock(index);
 				tick = Physics.OnRandomTick[block];
 				if (tick) tick(index, block);
 
 				index = Random_Range(&physics_rnd, lo, hi);
-				block = World.Blocks[index];
+				block = Physics_GetBlock(index);
 				tick = Physics.OnRandomTick[block];
 				if (tick) tick(index, block);
 
 				index = Random_Range(&physics_rnd, lo, hi);
-				block = World.Blocks[index];
+				block = Physics_GetBlock(index);
 				tick = Physics.OnRandomTick[block];
 				if (tick) tick(index, block);
 			}
@@ -208,7 +214,7 @@ static void Physics_DoFalling(int index, BlockID block) {
 	/* Find lowest block can fall into */
 	while (index >= World.OneY) {
 		index -= World.OneY;
-		other  = World.Blocks[index];
+		other  = Physics_GetBlock(index);
 
 		if (other == BLOCK_AIR || (other >= BLOCK_WATER && other <= BLOCK_STILL_LAVA))
 			found = index;
@@ -248,7 +254,7 @@ static void Physics_HandleSapling(int index, BlockID block) {
 	World_Unpack(index, x, y, z);
 
 	below = BLOCK_AIR;
-	if (y > 0) below = World.Blocks[index - World.OneY];
+	if (y > 0) below = Physics_GetBlock(index - World.OneY);
 	/* Saplings stay alive on dirt */
 	if (below == BLOCK_DIRT) return;
 
@@ -298,7 +304,7 @@ static void Physics_HandleFlower(int index, BlockID block) {
 	}
 
 	below = BLOCK_DIRT;
-	if (y > 0) below = World.Blocks[index - World.OneY];
+	if (y > 0) below = Physics_GetBlock(index - World.OneY);
 	if (!(below == BLOCK_DIRT || below == BLOCK_GRASS)) {
 		Game_UpdateBlock(x, y, z, BLOCK_AIR);
 		Physics_ActivateNeighbours(x, y, z, index);
@@ -317,7 +323,7 @@ static void Physics_HandleMushroom(int index, BlockID block) {
 	}
 
 	below = BLOCK_STONE;
-	if (y > 0) below = World.Blocks[index - World.OneY];
+	if (y > 0) below = Physics_GetBlock(index - World.OneY);
 	if (!(below == BLOCK_STONE || below == BLOCK_COBBLE)) {
 		Game_UpdateBlock(x, y, z, BLOCK_AIR);
 		Physics_ActivateNeighbours(x, y, z, index);
@@ -330,7 +336,7 @@ static void Physics_PlaceLava(int index, BlockID block) {
 }
 
 static void Physics_PropagateLava(int posIndex, int x, int y, int z) {
-	BlockID block = World.Blocks[posIndex];
+	BlockID block = Physics_GetBlock(posIndex);
 
 	if (block >= BLOCK_WATER && block <= BLOCK_STILL_LAVA) {
 		/* Lava spreading into water turns the water solid */
@@ -359,7 +365,7 @@ static void Physics_TickLava(void) {
 	for (i = 0; i < count; i++) {
 		int index;
 		if (Physics_CheckItem(&lavaQ, &index)) {
-			BlockID block = World.Blocks[index];
+			BlockID block = Physics_GetBlock(index);
 			if (!(block == BLOCK_LAVA || block == BLOCK_STILL_LAVA)) continue;
 			Physics_ActivateLava(index, block);
 		}
@@ -372,7 +378,7 @@ static void Physics_PlaceWater(int index, BlockID block) {
 }
 
 static void Physics_PropagateWater(int posIndex, int x, int y, int z) {
-	BlockID block = World.Blocks[posIndex];
+	BlockID block = Physics_GetBlock(posIndex);
 	int xx, yy, zz;
 
 	if (block >= BLOCK_WATER && block <= BLOCK_STILL_LAVA) {
@@ -412,7 +418,7 @@ static void Physics_TickWater(void) {
 	for (i = 0; i < count; i++) {
 		int index;
 		if (Physics_CheckItem(&waterQ, &index)) {
-			BlockID block = World.Blocks[index];
+			BlockID block = Physics_GetBlock(index);
 			if (!(block == BLOCK_WATER || block == BLOCK_STILL_WATER)) continue;
 			Physics_ActivateWater(index, block);
 		}
@@ -449,7 +455,7 @@ static void Physics_DeleteSponge(int index, BlockID block) {
 					if (!World_Contains(xx, yy, zz)) continue;
 
 					index = World_Pack(xx, yy, zz);
-					block = World.Blocks[index];
+					block = Physics_GetBlock(index);
 					if (block == BLOCK_WATER || block == BLOCK_STILL_WATER) {
 						TickQueue_Enqueue(&waterQ, index | PHYSICS_ONE_DELAY);
 					}
@@ -465,7 +471,7 @@ static void Physics_HandleSlab(int index, BlockID block) {
 	World_Unpack(index, x, y, z);
 	if (index < World.OneY) return;
 
-	if (World.Blocks[index - World.OneY] != BLOCK_SLAB) return;
+	if (Physics_GetBlock(index - World.OneY) != BLOCK_SLAB) return;
 	Game_UpdateBlock(x, y,     z, BLOCK_AIR);
 	Game_UpdateBlock(x, y - 1, z, BLOCK_DOUBLE_SLAB);
 }
@@ -475,7 +481,7 @@ static void Physics_HandleCobblestoneSlab(int index, BlockID block) {
 	World_Unpack(index, x, y, z);
 	if (index < World.OneY) return;
 
-	if (World.Blocks[index - World.OneY] != BLOCK_COBBLE_SLAB) return;
+	if (Physics_GetBlock(index - World.OneY) != BLOCK_COBBLE_SLAB) return;
 	Game_UpdateBlock(x, y,     z, BLOCK_AIR);
 	Game_UpdateBlock(x, y - 1, z, BLOCK_COBBLE);
 }
@@ -508,7 +514,7 @@ static void Physics_HandleTnt(int index, BlockID block) {
 				if (!World_Contains(xx, yy, zz)) continue;
 				index = World_Pack(xx, yy, zz);
 
-				block = World.Blocks[index];
+				block = Physics_GetBlock(index);
 				if (BlocksTNT(block)) continue;
 
 				Game_UpdateBlock(xx, yy, zz, BLOCK_AIR);
@@ -566,7 +572,7 @@ void Physics_Free(void) {
 }
 
 void Physics_Tick(void) {
-	if (!Physics.Enabled || !World.Blocks) return;
+	if (!Physics.Enabled || !World_HasBlocks()) return;
 
 	/*if ((tickCount % 5) == 0) {*/
 	Physics_TickLava();

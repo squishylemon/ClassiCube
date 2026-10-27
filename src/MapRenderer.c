@@ -495,7 +495,7 @@ void MapRenderer_Refresh(void) {
 	int oldCount;
 	chunkPos = IVec3_MaxValue();
 
-	if (mapChunks && World.Blocks) {
+	if (mapChunks && World_HasBlocks()) {
 		DeleteChunks();
 
 		oldCount = MapRenderer_1DUsedCount;
@@ -515,7 +515,7 @@ static void RefreshBorderChunks(int maxHeight) {
 	cc_bool onBorder;
 
 	chunkPos = IVec3_MaxValue();
-	if (!mapChunks || !World.Blocks) return;
+	if (!mapChunks || !World_HasBlocks()) return;
 
 	for (cz = 0; cz < World.ChunksZ; cz++) {
 		for (cy = 0; cy < World.ChunksY; cy++) {

@@ -52,7 +52,9 @@ static int ClassicLighting_CalcHeightAt(int x, int maxY, int z, int hIndex) {
 	BlockID block;
 	int y, offset;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	ClassicLighting_CalcBody(World_GetBlock(x, y, z));
+#elif !defined EXTENDED_BLOCKS
 	ClassicLighting_CalcBody(World.Blocks[i]);
 #else
 	if (World.IDMask <= 0xFF) {
@@ -179,7 +181,9 @@ static cc_bool ClassicLighting_NeedsNeighour(BlockID block, int i, int minY, int
 	BlockID other;
 	cc_bool affected;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	ClassicLighting_NeedsNeighourBody(World_GetBlockAt(i));
+#elif !defined EXTENDED_BLOCKS
 	ClassicLighting_NeedsNeighourBody(World.Blocks[i]);
 #else
 	if (World.IDMask <= 0xFF) {
@@ -346,7 +350,9 @@ static cc_bool Heightmap_CalculateCoverage(int x1, int z1, int xCount, int zCoun
 	int mapIndex, hIndex, baseIndex, index;
 	int x, y, z;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	Heightmap_CalculateBody(World_GetBlock(x1 + x, y, z1 + z));
+#elif !defined EXTENDED_BLOCKS
 	Heightmap_CalculateBody(World.Blocks[mapIndex]);
 #else
 	if (World.IDMask <= 0xFF) {

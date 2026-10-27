@@ -262,13 +262,17 @@ for (yy = -1; yy < 17; ++yy) {\
 }
 
 static cc_bool ReadChunkData(int x1, int y1, int z1, cc_bool* outAllAir) {
+#ifndef CC_BUILD_COMPACTMAP
 	BlockRaw* blocks = World.Blocks;
+#endif
 	cc_bool allAir = true, allSolid = true;
 	int index, cIndex;
 	BlockID block;
 	int xx, yy, zz, y;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	ReadChunkBody(World_GetBlock(x1 + xx, y, z1 + zz));
+#elif !defined EXTENDED_BLOCKS
 	ReadChunkBody(blocks[index]);
 #else
 	BlockRaw* blocks2;
@@ -312,14 +316,18 @@ for (yy = -1; yy < 17; ++yy) {\
 }
 
 static cc_bool ReadBorderChunkData(int x1, int y1, int z1, cc_bool* outAllAir) {
+#ifndef CC_BUILD_COMPACTMAP
 	BlockRaw* blocks = World.Blocks;
+#endif
 	BlockRaw* blocks2;
 	cc_bool allAir = true;
 	int index, cIndex;
 	BlockID block;
 	int xx, yy, zz, x, y, z;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	ReadBorderChunkBody(World_GetBlock(x, y, z));
+#elif !defined EXTENDED_BLOCKS
 	ReadBorderChunkBody(blocks[index]);
 #else
 	if (World.IDMask <= 0xFF) {

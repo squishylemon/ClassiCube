@@ -91,7 +91,7 @@ void Gen_Start(const struct MapGenerator* gen, int seed,
 
 	gen_active = gen;
 	Gen_Reset();
-	Gen_Blocks = (BlockRaw*)Mem_TryAlloc(World.Volume, 1);
+	Gen_Blocks = World_TryAllocBlocks(World.Volume);
 
 	if (!Gen_Blocks || !gen->Prepare(seed)) {
 		Window_ShowDialog("Out of memory", "Not enough free memory to generate a map that large.\nTry a smaller size.");
@@ -778,6 +778,13 @@ const struct MapGenerator NotchyGen = {
 BlockRaw* Tree_Blocks;
 RNGState* Tree_Rnd;
 
+#ifdef CC_BUILD_COMPACTMAP
+/* Tree_Blocks is NULL when growing trees in an already loaded world */
+#define Tree_GetBlock(index, x, y, z) (Tree_Blocks ? Tree_Blocks[index] : World_GetBlock(x, y, z))
+#else
+#define Tree_GetBlock(index, x, y, z) Tree_Blocks[index]
+#endif
+
 cc_bool TreeGen_CanGrow(int treeX, int treeY, int treeZ, int treeHeight) {
 	int baseHeight = treeHeight - 4;
 	int index;
@@ -790,7 +797,7 @@ cc_bool TreeGen_CanGrow(int treeX, int treeY, int treeZ, int treeHeight) {
 
 				if (!World_Contains(x, y, z)) return false;
 				index = World_Pack(x, y, z);
-				if (Tree_Blocks[index] != BLOCK_AIR) return false;
+				if (Tree_GetBlock(index, x, y, z) != BLOCK_AIR) return false;
 			}
 		}
 	}
@@ -802,7 +809,7 @@ cc_bool TreeGen_CanGrow(int treeX, int treeY, int treeZ, int treeHeight) {
 
 				if (!World_Contains(x, y, z)) return false;
 				index = World_Pack(x, y, z);
-				if (Tree_Blocks[index] != BLOCK_AIR) return false;
+				if (Tree_GetBlock(index, x, y, z) != BLOCK_AIR) return false;
 			}
 		}
 	}

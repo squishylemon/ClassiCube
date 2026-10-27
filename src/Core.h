@@ -542,9 +542,10 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_LOWMEM
 	#define CC_BUILD_COOPTHREADED
 	#define CC_BUILD_SPLITSCREEN
+	#define CC_BUILD_NOMUSIC /* Music needs ~17 MB of storage, too large for memory cards */
+	#define CC_BUILD_COMPACTMAP /* Uniform 16x16x16 chunks stored as a single block */
 	#define DEFAULT_NET_BACKEND CC_NET_BACKEND_BUILTIN
 	#define DEFAULT_SSL_BACKEND CC_SSL_BACKEND_BEARSSL
-	#define DEFAULT_AUD_BACKEND CC_AUD_BACKEND_NULL
 	#define CC_WEAKFUNC __attribute__((weak))
 #elif defined PLAT_GBA
 	#define CC_BUILD_GBA
@@ -722,6 +723,9 @@ typedef cc_uint8  cc_bool;
 #endif
 #ifndef CC_BUILD_LOWMEM
 	#define EXTENDED_BLOCKS
+#endif
+#if defined CC_BUILD_COMPACTMAP && defined EXTENDED_BLOCKS
+	#error "CC_BUILD_COMPACTMAP does not support EXTENDED_BLOCKS"
 #endif
 #ifndef CC_BUILD_TINYMEM
 	#define EXTENDED_TEXTURES

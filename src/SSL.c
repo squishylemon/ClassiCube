@@ -180,6 +180,10 @@ cc_result SSL_Init(cc_socket socket, const cc_string* host_, void** out_ctx) {
 		TAs[6].pkey.key.ec.curve = BR_EC_secp384r1;
 		TAs[6].pkey.key.ec.q = (unsigned char *)TA6_EC_Q;
 		TAs[6].pkey.key.ec.qlen = sizeof TA6_EC_Q;
+		
+		TAs[7].pkey.key.ec.curve = BR_EC_secp384r1;
+		TAs[7].pkey.key.ec.q = (unsigned char *)TA7_EC_Q;
+		TAs[7].pkey.key.ec.qlen = sizeof TA7_EC_Q;
 	}
 #endif
 	

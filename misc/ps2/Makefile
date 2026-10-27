@@ -19,7 +19,7 @@ default: $(TARGET)-min.elf
 #---------------------------------------------------------------------------------
 # Code generation
 #---------------------------------------------------------------------------------
-LIBS	:= -lpatches -lpad -ldma -lgraph -lc -lps2ip -lnetman -lmc -lmouse -lkbd
+LIBS	:= -lpatches -lpad -ldma -lgraph -lc -lps2ip -lnetman -lmc -lmouse -lkbd -laudsrv
 
 CFLAGS 	:= -D_EE -G0 -O2 -Wall -gdwarf-2 -gz -DPLAT_PS2 \
 				-I$(PS2SDK)/ee/include -I$(PS2SDK)/common/include
@@ -45,7 +45,8 @@ VCL 	:= openvcl/openvcl
 IOP_SRCS := ps2dev9 netman smap \
 			bdm bdmfs_fatfs \
 			usbd usbmass_bd usbhdfsd \
-			ps2mouse ps2kbd
+			ps2mouse ps2kbd \
+			libsd audsrv
 
 IOP_MODS := $(patsubst %,$(BUILD_DIR)/%_irx.o,$(IOP_SRCS))
 OBJECTS += $(IOP_MODS)

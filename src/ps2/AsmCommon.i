@@ -22,6 +22,9 @@
 #define CL_F  $vf5 // clipping scale adjustments to match guardbands
 #define VP_O  $vf6 // viewport origin
 #define VP_S  $vf7 // viewport scale
+#define FOG_S $vf8  // fog scale (same value in all components)
+#define FOG_B $vf9  // fog bias  (same value in all components)
+#define FOG_M $vf19 // x = maximum fog value (255)
 
 
 // ===============================

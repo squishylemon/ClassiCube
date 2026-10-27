@@ -55,12 +55,21 @@ static int DrawText(const char* msg, struct Bitmap* bmp, int y) {
 #define VD_MAX_ITERS (5000 / VD_TICK_INTERVAL)
 
 void VirtualDialog_Show(const char* title, const char* msg, cc_bool oneshot) {
+	static cc_bool allocating;
 	struct Bitmap bmp;
 	Platform_LogConst(title);
 	Platform_LogConst(msg);
 
+	// When out of memory, allocating the framebuffer fails and shows the 'crashed' dialog,
+	//  which would then try to allocate the framebuffer again (and so on, forever)
+	if (allocating) return;
+
 	if (!LBackend_FB.bmp.scan0) {
+		allocating = true;
 		Window_AllocFramebuffer(&bmp, DisplayInfo.Width, DisplayInfo.Height);
+		allocating = false;
+		/* Some platforms return no pixels when out of memory (message was still logged above) */
+		if (!bmp.scan0) return;
 	} else {
 		bmp = LBackend_FB.bmp;
 	}

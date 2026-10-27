@@ -132,9 +132,16 @@ static void VirtualKeyboard_Close(void);
 static void VirtualKeyboard_Hook(void);
 
 
+/* Platforms can override these colours (e.g. to make the keyboard more readable on a TV) */
+#ifndef KB_NORMAL_COLOR
 #define KB_NORMAL_COLOR     BitmapCol_Make(0x7F, 0x7F, 0x7F, 0x90)
+#endif
+#ifndef KB_SELECTED_COLOR
 #define KB_SELECTED_COLOR   BitmapCol_Make(0xAF, 0xAF, 0xAF, 0x90)
+#endif
+#ifndef KB_BACKGROUND_COLOR
 #define KB_BACKGROUND_COLOR BitmapCol_Make(0xFF, 0xFF, 0xFF, 0x90)
+#endif
 
 static void VirtualKeyboard_Draw(struct Context2D* ctx) {
 	struct DrawTextArgs args;
@@ -249,9 +256,11 @@ static void VirtualKeyboard_ClickSelected(void) {
 		break;
 	case KB_B_ENTER:
 		kb_curX = -1;
+		/* Must close first, otherwise the Enter key press would be swallowed by */
+		/*  VirtualKeyboard_OnInputDown, since it's still the input hook while open */
+		OnscreenKeyboard_Close();
 		Input_SetPressed(CCKEY_ENTER);
 		Input_SetReleased(CCKEY_ENTER);
-		OnscreenKeyboard_Close();
 		break;
 
 	case KB_B_CAPS:

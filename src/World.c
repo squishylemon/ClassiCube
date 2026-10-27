@@ -10,6 +10,7 @@
 #include "Game.h"
 #include "TexturePack.h"
 #include "Window.h"
+#include "Funcs.h"
 
 struct _WorldData World;
 static char nameBuffer[STRING_SIZE];
@@ -37,13 +38,381 @@ static void GenerateNewUuid(void) {
 	World.Uuid[8] |= 0x80; /* variant 2*/
 }
 
+#if defined CC_BUILD_LOWMEM && !defined CC_BUILD_COMPACTMAP
+/* Instead of freeing the previous map's blocks, they are kept around and reused for */
+/*  the next map. Otherwise, the memory freed by the previous map would quickly get */
+/*  split up by other small allocations (e.g. textures), and there would then no longer */
+/*  be a large enough contiguous block of memory to allocate the next map's blocks in */
+static BlockRaw* spare_blocks;
+static cc_uint32 spare_volume;
+
+BlockRaw* World_TryAllocBlocks(cc_uint32 volume) {
+	BlockRaw* blocks;
+	cc_uint32 spareVolume;
+
+	if (spare_blocks && volume <= spare_volume) {
+		blocks       = spare_blocks;
+		spare_blocks = NULL;
+		spare_volume = 0;
+		return blocks;
+	}
+
+	blocks = (BlockRaw*)Mem_TryAlloc(volume, 1);
+	if (blocks || !spare_blocks) return blocks;
+
+	/* Not enough memory, so try again after freeing the spare blocks */
+	spareVolume = spare_volume;
+	World_FreeSpareBlocks();
+	blocks = (BlockRaw*)Mem_TryAlloc(volume, 1);
+	if (blocks) return blocks;
+
+	/* Still not enough memory for this map (e.g. it's too large), so reclaim */
+	/*  the spare blocks memory before it gets split up by other allocations */
+	spare_blocks = (BlockRaw*)Mem_TryAlloc(spareVolume, 1);
+	spare_volume = spare_blocks ? spareVolume : 0;
+	return NULL;
+}
+
+void World_FreeBlocks(BlockRaw* blocks, cc_uint32 volume) {
+	if (!blocks) return;
+	/* Only keep the largest blocks array around */
+	if (spare_blocks && spare_volume >= volume) { Mem_Free(blocks); return; }
+
+	World_FreeSpareBlocks();
+	spare_blocks = blocks;
+	spare_volume = volume;
+}
+
+void World_FreeSpareBlocks(void) {
+	Mem_Free(spare_blocks);
+	spare_blocks = NULL;
+	spare_volume = 0;
+}
+#else
+BlockRaw* World_TryAllocBlocks(cc_uint32 volume) {
+	return (BlockRaw*)Mem_TryAlloc(volume, 1);
+}
+
+void World_FreeBlocks(BlockRaw* blocks, cc_uint32 volume) { Mem_Free(blocks); }
+void World_FreeSpareBlocks(void) { }
+#endif
+
+
+#ifdef CC_BUILD_COMPACTMAP
+/*########################################################################################################################*
+*-------------------------------------------------------Compact map-------------------------------------------------------*
+*#########################################################################################################################*/
+/* Most chunks in a map are entirely one block (e.g. air above the ground, or dirt/stone below it), */
+/*  so storing such chunks as a single block greatly reduces memory usage of large maps */
+static void Chunks_Free(void) {
+	int i;
+	if (World.ChunkBlocks) {
+		for (i = 0; i < World.ChunksCount; i++) { Mem_Free(World.ChunkBlocks[i]); }
+	}
+
+	Mem_Free(World.ChunkBlocks);
+	Mem_Free(World.ChunkFills);
+	World.ChunkBlocks = NULL;
+	World.ChunkFills  = NULL;
+}
+
+/* Copies count blocks starting at the given packed index into dst */
+typedef void (*FetchBlocksRow)(BlockRaw* dst, cc_uint32 index, int count);
+/* Called after all chunks up to the given packed index have been built */
+typedef void (*ReleaseBlocks)(cc_uint32 index);
+
+static cc_bool Chunks_Build(FetchBlocksRow fetch, ReleaseBlocks release) {
+	BlockRaw chunk[CHUNK_SIZE_3];
+	int cx, cy, cz, x1, y1, z1, xCount, yCount, zCount;
+	int y, z, i, j;
+	BlockRaw* blocks;
+	BlockRaw fill;
+
+	World.ChunkBlocks = (BlockRaw**)Mem_TryAllocCleared(World.ChunksCount, sizeof(BlockRaw*));
+	World.ChunkFills  = (BlockRaw*) Mem_TryAllocCleared(World.ChunksCount, sizeof(BlockRaw));
+	if (!World.ChunkBlocks || !World.ChunkFills) { Chunks_Free(); return false; }
+
+	for (cy = 0; cy < World.ChunksY; cy++)
+	{
+		y1 = cy << CHUNK_SHIFT; yCount = min(CHUNK_SIZE, World.Height - y1);
+
+		for (cz = 0; cz < World.ChunksZ; cz++)
+		{
+			z1 = cz << CHUNK_SHIFT; zCount = min(CHUNK_SIZE, World.Length - z1);
+
+			for (cx = 0; cx < World.ChunksX; cx++)
+			{
+				x1 = cx << CHUNK_SHIFT; xCount = min(CHUNK_SIZE, World.Width - x1);
+
+				/* Parts of chunks outside the map are never accessed, so just leave them as fill */
+				fetch(&fill, World_Pack(x1, y1, z1), 1);
+				Mem_Set(chunk, fill, sizeof(chunk));
+
+				for (y = 0; y < yCount; y++)
+					for (z = 0; z < zCount; z++)
+				{
+					fetch(&chunk[World_ChunkLocal(0, y, z)], World_Pack(x1, y1 + y, z1 + z), xCount);
+				}
+
+				i = World_ChunkPack(cx, cy, cz);
+				World.ChunkFills[i] = fill;
+
+				for (j = 0; j < CHUNK_SIZE_3; j++)
+				{
+					if (chunk[j] != fill) break;
+				}
+				if (j == CHUNK_SIZE_3) continue;
+
+				blocks = (BlockRaw*)Mem_TryAlloc(CHUNK_SIZE_3, 1);
+				if (!blocks) { Chunks_Free(); return false; }
+
+				Mem_Copy(blocks, chunk, CHUNK_SIZE_3);
+				World.ChunkBlocks[i] = blocks;
+			}
+		}
+
+		if (release) release(World_Pack(0, y1 + yCount, 0));
+	}
+
+	for (i = 0, j = 0; i < World.ChunksCount; i++)
+	{
+		if (World.ChunkBlocks[i]) j++;
+	}
+	Platform_Log2("Map chunks: %i of %i not uniform", &j, &World.ChunksCount);
+	return true;
+}
+
+BlockID World_GetBlockAt(int index) {
+	int x, y, z;
+	World_Unpack(index, x, y, z);
+	return World_GetBlock(x, y, z);
+}
+
+void World_SetBlock(int x, int y, int z, BlockID block) {
+	int i = World_ChunkPack(x >> CHUNK_SHIFT, y >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
+	BlockRaw* blocks = World.ChunkBlocks[i];
+
+	/* Lazily expand chunks that were entirely one block */
+	if (!blocks) {
+		if (World.ChunkFills[i] == block) return;
+
+		blocks = (BlockRaw*)Mem_TryAlloc(CHUNK_SIZE_3, 1);
+		if (!blocks) { Platform_LogConst("Out of memory, unable to change block"); return; }
+
+		Mem_Set(blocks, World.ChunkFills[i], CHUNK_SIZE_3);
+		World.ChunkBlocks[i] = blocks;
+	}
+	blocks[World_ChunkLocal(x, y, z)] = (BlockRaw)block;
+}
+
+
+/*########################################################################################################################*
+*-------------------------------------------------------Staged map--------------------------------------------------------*
+*#########################################################################################################################*/
+/* Servers send the map's dimensions only after all of the map's blocks, so the blocks can't */
+/*  be put into chunks as they are received. Instead they are stored in 4096 block 'segments' */
+/*  (where segments that are all the same block are stored as a single block, and other */
+/*  segments are run length encoded), and then converted into chunks once the dimensions are known */
+#define SEGMENT_SHIFT 12
+#define SEGMENT_SIZE  (1 << SEGMENT_SHIFT)
+#define SEGMENT_MASK  (SEGMENT_SIZE - 1)
+#define DECODE_CACHE_SIZE 64
+
+static BlockRaw** staged_segs;
+static BlockRaw*  staged_fills;
+static cc_uint16* staged_rleLens; /* 0 if segment is stored uncompressed */
+static cc_uint32 staged_volume, staged_count, staged_committed, staged_index;
+static BlockRaw staged_buffer[SEGMENT_SIZE];
+static BlockRaw rle_buffer[SEGMENT_SIZE];
+
+/* Recently decoded segments, so they don't need to be decoded again for each chunk */
+static BlockRaw* decode_cache;
+static cc_uint32 decode_tags[DECODE_CACHE_SIZE];
+static int decode_slots;
+
+void World_FreeStagedMap(void) {
+	cc_uint32 i;
+	if (staged_segs) {
+		for (i = 0; i < staged_count; i++) { Mem_Free(staged_segs[i]); }
+	}
+
+	Mem_Free(staged_segs);
+	Mem_Free(staged_fills);
+	Mem_Free(staged_rleLens);
+	Mem_Free(decode_cache);
+	staged_segs    = NULL;
+	staged_fills   = NULL;
+	staged_rleLens = NULL;
+	decode_cache   = NULL;
+	staged_volume    = 0;
+	staged_count     = 0;
+	staged_committed = 0;
+	staged_index     = 0;
+}
+
+cc_bool World_BeginStagedMap(cc_uint32 volume) {
+	World_FreeStagedMap();
+	staged_count = (volume + SEGMENT_MASK) >> SEGMENT_SHIFT;
+	if (!staged_count) return false;
+
+	/* Segments that are never received are treated as air */
+	staged_segs    = (BlockRaw**)Mem_TryAllocCleared(staged_count, sizeof(BlockRaw*));
+	staged_fills   = (BlockRaw*) Mem_TryAllocCleared(staged_count, sizeof(BlockRaw));
+	staged_rleLens = (cc_uint16*)Mem_TryAllocCleared(staged_count, sizeof(cc_uint16));
+	if (!staged_segs || !staged_fills || !staged_rleLens) { World_FreeStagedMap(); return false; }
+
+	staged_volume = volume;
+	return true;
+}
+
+BlockRaw* World_GetStagingBuffer(cc_uint32 index, cc_uint32* count) {
+	*count = min(SEGMENT_SIZE - (index & SEGMENT_MASK), staged_volume - index);
+	return &staged_buffer[index & SEGMENT_MASK];
+}
+
+/* Run length encodes the staging buffer as (run length - 1, block) pairs */
+/* Returns 0 if the encoded data would not be smaller than the original data */
+static int EncodeSegment(int count) {
+	int i = 0, len = 0, run;
+	BlockRaw block;
+
+	while (i < count)
+	{
+		block = staged_buffer[i];
+		for (run = 1; i + run < count && run < 256 && staged_buffer[i + run] == block; run++) { }
+
+		if (len + 2 >= count) return 0;
+		rle_buffer[len++] = (BlockRaw)(run - 1);
+		rle_buffer[len++] = block;
+		i += run;
+	}
+	return len;
+}
+
+static cc_bool CommitSegment(cc_uint32 seg, int count) {
+	BlockRaw fill = staged_buffer[0];
+	BlockRaw* blocks;
+	int i, len;
+
+	for (i = 1; i < count; i++)
+	{
+		if (staged_buffer[i] != fill) break;
+	}
+	staged_fills[seg] = fill;
+	if (i == count) return true;
+
+	len = EncodeSegment(count);
+	if (len) {
+		blocks = (BlockRaw*)Mem_TryAlloc(len, 1);
+		if (!blocks) return false;
+		Mem_Copy(blocks, rle_buffer, len);
+	} else {
+		blocks = (BlockRaw*)Mem_TryAlloc(SEGMENT_SIZE, 1);
+		if (!blocks) return false;
+		Mem_Copy(blocks, staged_buffer, count);
+	}
+
+	staged_segs[seg]    = blocks;
+	staged_rleLens[seg] = (cc_uint16)len;
+	return true;
+}
+
+static BlockRaw* GetDecodedSegment(cc_uint32 seg) {
+	BlockRaw* src = staged_segs[seg];
+	BlockRaw* dst;
+	int i, len, slot;
+	if (!staged_rleLens[seg]) return src;
+
+	/* Mix in higher bits, since the segments used by a chunk are often 'map width * length' apart */
+	slot = (int)((seg ^ (seg >> 6) ^ (seg >> 12)) % decode_slots);
+	dst  = decode_cache + slot * SEGMENT_SIZE;
+	if (decode_tags[slot] == seg) return dst;
+
+	len = staged_rleLens[seg];
+	for (i = 0; i < len; i += 2)
+	{
+		Mem_Set(dst, src[i + 1], src[i] + 1);
+		dst += src[i] + 1;
+	}
+
+	decode_tags[slot] = seg;
+	return decode_cache + slot * SEGMENT_SIZE;
+}
+
+static cc_bool AllocDecodeCache(void) {
+	int i;
+	/* Fallback to a smaller cache (slower) when low on memory */
+	for (decode_slots = DECODE_CACHE_SIZE; decode_slots >= 1; decode_slots /= 4)
+	{
+		decode_cache = (BlockRaw*)Mem_TryAlloc(decode_slots, SEGMENT_SIZE);
+		if (decode_cache) break;
+	}
+	if (!decode_cache) return false;
+
+	for (i = 0; i < DECODE_CACHE_SIZE; i++) { decode_tags[i] = (cc_uint32)-1; }
+	return true;
+}
+
+/* Commits the segment currently being written to, if it hasn't been already */
+static cc_bool CommitCurrentSegment(void) {
+	if (!staged_index || ((staged_index - 1) >> SEGMENT_SHIFT) != staged_committed) return true;
+
+	staged_committed++;
+	return CommitSegment(staged_committed - 1, ((staged_index - 1) & SEGMENT_MASK) + 1);
+}
+
+cc_bool World_StagedBlocksWritten(cc_uint32 index) {
+	staged_index = index;
+	/* Commit when the segment is entirely filled, or when the end of the map is reached */
+	if ((index & SEGMENT_MASK) && index < staged_volume) return true;
+	return CommitCurrentSegment();
+}
+
+static void FetchStagedRow(BlockRaw* dst, cc_uint32 index, int count) {
+	cc_uint32 seg;
+	int n;
+
+	while (count > 0)
+	{
+		seg = index >> SEGMENT_SHIFT;
+		n   = min(count, SEGMENT_SIZE - (int)(index & SEGMENT_MASK));
+
+		if (staged_segs[seg]) {
+			Mem_Copy(dst, &GetDecodedSegment(seg)[index & SEGMENT_MASK], n);
+		} else {
+			Mem_Set(dst, staged_fills[seg], n);
+		}
+		dst += n; index += n; count -= n;
+	}
+}
+
+static void ReleaseStagedRows(cc_uint32 index) {
+	cc_uint32 seg;
+	/* Free segments that are entirely before the given index, as they will never be needed again */
+	for (seg = 0; seg < staged_count && (seg + 1) * SEGMENT_SIZE <= index; seg++)
+	{
+		Mem_Free(staged_segs[seg]);
+		staged_segs[seg] = NULL;
+	}
+}
+
+static BlockRaw* flat_blocks;
+static void FetchFlatRow(BlockRaw* dst, cc_uint32 index, int count) {
+	Mem_Copy(dst, &flat_blocks[index], count);
+}
+#endif
+
 void World_Reset(void) {
 #ifdef EXTENDED_BLOCKS
 	if (World.Blocks != World.Blocks2) Mem_Free(World.Blocks2);
 	World.Blocks2 = NULL;
 	World.IDMask  = 0xFF;
 #endif
-	Mem_Free(World.Blocks);
+#ifdef CC_BUILD_COMPACTMAP
+	Chunks_Free();
+	World_FreeStagedMap();
+#endif
+	World_FreeBlocks(World.Blocks, World.Volume);
 	World.Blocks = NULL;
 	String_InitArray(World.Name, nameBuffer);
 
@@ -59,13 +428,59 @@ void World_NewMap(void) {
 	Event_RaiseVoid(&WorldEvents.NewMap);
 }
 
+static void FinishNewMap(int height) {
+	World.Name.length = 0;
+	if (Env.EdgeHeight == -1)   { Env.EdgeHeight   = height / 2; }
+	if (Env.CloudsHeight == -1) { Env.CloudsHeight = height + 2; }
+
+	GenerateNewUuid();
+	World.Loaded = true;
+	Event_RaiseVoid(&WorldEvents.MapLoaded);
+}
+
+#ifdef CC_BUILD_COMPACTMAP
+static void MapBuildFailed(int* height) {
+	/* Free as much memory as possible first, as showing the dialog needs memory too */
+	World_FreeStagedMap();
+	Window_ShowDialog("Out of memory", "Not enough free memory to load the map.\nTry joining a different map.");
+	*height = 0;
+	World_SetDimensions(0, 0, 0);
+}
+
+void World_SetNewMap(BlockRaw* blocks, int width, int height, int length) {
+	/* TODO: TEMP HACK */
+	if (!blocks) { width = 0; height = 0; length = 0; }
+	World_SetDimensions(width, height, length);
+
+	flat_blocks = blocks;
+	if (World.Volume && !Chunks_Build(FetchFlatRow, NULL)) MapBuildFailed(&height);
+	flat_blocks = NULL;
+
+	Mem_Free(blocks);
+	World.Blocks = NULL;
+	FinishNewMap(height);
+}
+
+void World_SetNewStagedMap(int width, int height, int length) {
+	World_SetDimensions(width, height, length);
+
+	if (!staged_segs || (cc_uint32)World.Volume != staged_volume) {
+		height = 0;
+		World_SetDimensions(0, 0, 0);
+	} else if (!CommitCurrentSegment() || !AllocDecodeCache() || !Chunks_Build(FetchStagedRow, ReleaseStagedRows)) {
+		MapBuildFailed(&height);
+	}
+
+	World_FreeStagedMap();
+	FinishNewMap(height);
+}
+#else
 void World_SetNewMap(BlockRaw* blocks, int width, int height, int length) {
 	/* TODO: TEMP HACK */
 	if (!blocks) { width = 0; height = 0; length = 0; }
 
 	World_SetDimensions(width, height, length);
-	World.Blocks      = blocks;
-	World.Name.length = 0;
+	World.Blocks = blocks;
 
 	if (!World.Volume) World.Blocks = NULL;
 #ifdef EXTENDED_BLOCKS
@@ -75,14 +490,9 @@ void World_SetNewMap(BlockRaw* blocks, int width, int height, int length) {
 		World.IDMask  = 0xFF;
 	}
 #endif
-
-	if (Env.EdgeHeight == -1)   { Env.EdgeHeight   = height / 2; }
-	if (Env.CloudsHeight == -1) { Env.CloudsHeight = height + 2; }
-
-	GenerateNewUuid();
-	World.Loaded = true;
-	Event_RaiseVoid(&WorldEvents.MapLoaded);
+	FinishNewMap(height);
 }
+#endif
 
 CC_NOINLINE void World_SetDimensions(int width, int height, int length) {
 	World.Width  = width; World.Height = height; World.Length = length;
@@ -134,9 +544,9 @@ void World_SetBlock(int x, int y, int z, BlockID block) {
 	}
 	World.Blocks2[i] = (BlockRaw)(block >> 8);
 }
-#else
+#elif !defined CC_BUILD_COMPACTMAP
 void World_SetBlock(int x, int y, int z, BlockID block) {
-	World.Blocks[World_Pack(x, y, z)] = block; 
+	World.Blocks[World_Pack(x, y, z)] = block;
 }
 #endif
 
