@@ -34,16 +34,29 @@ The PS2 port is now in a **playable state**. It has been tested in [PCSX2](https
   * Fog, back-face culling, scrolling clouds, block selection outlines and screenshots all work.
   * Textures stay in video memory instead of being re-uploaded every time they're used.
 * **Sound effects**
+* **Music**
+  * Downloaded music is converted on the console to compact ADPCM audio, which is also much cheaper to play than the original Ogg Vorbis.
+  * Quality is chosen to fit the free space on the memory card, from 22 kHz down to 8 kHz. USB drives and PCSX2's host folder always get 22 kHz.
+  * Converting takes a while the first time music is downloaded.
+* **Built-in textures and sounds**
+  * ClassiCube's own textures and sound effects are built into the game, so menus, the HUD and blocks are textured and sounds play even without network access.
+  * Downloading the original Minecraft Classic textures and sounds is still optional.
 * **Low memory handling**
   * When memory runs low, the game reduces view distance instead of crashing.
   * Maps that are too large show a clear message.
+* **Performance**
+  * In PCSX2, a generated 256×64×256 map runs at about 30 fps while walking and flying around, with no second below 24 fps. It used to run at 7–11 fps.
+  * The default view distance is 48 blocks, as every vertex is transformed by the CPU. It can be raised in the options.
+  * Faces between leaves aren't drawn, and chunks hidden by fog are skipped.
+  * Quads that are entirely off screen are discarded early, instead of going through the slow clipping path.
+  * The EE keeps working on the next frame while the GS draws the current one.
 
 #### Known limitations
 
-* Music is disabled, as it needs about 17 MB of storage, too much for a memory card.
+* Music is mono, and sounds noticeably duller on nearly full memory cards.
 * Maps that are mostly filled with builds can still be too large for 32 MB of RAM.
-* Performance in PCSX2 is roughly 10–20 fps on busy multiplayer maps, and around 20 fps in 4-player split screen.
-* In-game menus close with Select rather than Circle.
+* Frame rates were measured in PCSX2, which doesn't emulate EE cache misses, so real hardware may be slower.
+* Busy multiplayer maps and 4-player split screen haven't been measured again since the performance changes.
 
 #### Controls
 
@@ -57,7 +70,7 @@ The PS2 port is now in a **playable state**. It has been tested in [PCSX2](https
 | L1 / R1 | Place / delete block |
 | L2 / R2 | Previous / next hotbar slot |
 | Start | Pause menu |
-| Select | Back / close menu |
+| Circle / Select | Back / close menu |
 | Circle + R1 / L1 | Toggle flying / speed |
 | Circle + D-pad up / down | Fly up / down |
 
@@ -73,9 +86,17 @@ Run `make ps2` with [ps2sdk](https://github.com/ps2dev/ps2sdk) installed. Altern
 docker run --rm -v "$PWD:/src" -w /src ps2dev/ps2dev:latest sh -c "apk add --no-cache make && make ps2"
 ```
 
-This produces `ClassiCube-ps2.elf`, which can be run in PCSX2 or loaded on a PS2 with e.g. [wLaunchELF](https://github.com/ps2homebrew/wLaunchELF).
+This produces `ClassiCube-ps2-min.elf`, which can be run in PCSX2 or loaded on a PS2 with e.g. [wLaunchELF](https://github.com/ps2homebrew/wLaunchELF).
 
-The game stores its data next to the ELF when run from a USB drive or PCSX2's host folder. Otherwise it stores it on the memory card.
+To also make a disc image, run `make ps2 iso` instead (needs `xorriso`):
+
+```
+docker run --rm -v "$PWD:/src" -w /src ps2dev/ps2dev:latest sh -c "apk add --no-cache make xorriso && make ps2 iso"
+```
+
+This produces `ClassiCube-ps2.iso`, which boots in PCSX2 or through [Open PS2 Loader](https://github.com/ps2homebrew/Open-PS2-Loader). A burned disc only boots on a modded console. The disc just contains the game, since textures and sounds are built in.
+
+The game stores its data next to the ELF when run from a USB drive or PCSX2's host folder. Otherwise, including when booted from the disc image, it stores it on the memory card.
 
 ---
 

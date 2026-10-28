@@ -264,8 +264,21 @@ quad_culled:
 	jr $ra
 	move $v0, DST
 
-	# NULL is returned so that the caller clips the quad instead
 any_clipped_vertices:
+	# CLIP_FLAGS holds 6 flags for each of the 4 vertices. If all 4 vertices are
+	#  outside the same plane, then the quad can't be visible, so just discard it
+	#  (e.g. quads behind the camera, which would otherwise be clipped in C)
+	srl			$t1, $t0, 6
+	and			$t1, $t1, $t0
+	srl			$t2, $t0, 12
+	and			$t1, $t1, $t2
+	srl			$t2, $t0, 18
+	and			$t1, $t1, $t2
+	andi		$t1, $t1, 0x3F
+	bnez		$t1, quad_culled
+	nop
+
+	# NULL is returned so that the caller clips the quad instead
 	jr $ra
 	move $v0, $zero
 END_FUNC(DrawColouredQuad)

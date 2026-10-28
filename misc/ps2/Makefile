@@ -85,11 +85,32 @@ src/ps2/Graphics_PS2.c: $(SHDR_OBJS)
 # executable generation
 #---------------------------------------------------------------------------------
 OEXT		:= .elf
-GEN_FILES 	:= $(TARGET)-min.elf
+GEN_FILES 	:= $(TARGET)-min.elf $(TARGET).iso
 include misc/makefiles/common_build.mk
+
+# ClassiCube textures and sounds are embedded into the executable using .incbin
+$(BUILD_DIR)/src/TexturePack.o: misc/cc_textures.zip
+$(BUILD_DIR)/src/Audio.o: misc/cc_audio.zip
 
 $(TARGET)-min.elf: $(TARGET).elf
 	$(STRIP) $< -o $@
+
+
+#---------------------------------------------------------------------------------
+# disc image generation
+#---------------------------------------------------------------------------------
+ISO_DIR := $(BUILD_DIR)/iso
+
+# Disc only needs the executable, as textures and sounds are built into it
+# (needs xorriso, e.g. 'apk add xorriso' in the ps2dev Docker image)
+$(TARGET).iso: $(TARGET)-min.elf misc/ps2/SYSTEM.CNF
+	rm -rf $(ISO_DIR)
+	mkdir -p $(ISO_DIR)
+	cp misc/ps2/SYSTEM.CNF $(ISO_DIR)/SYSTEM.CNF
+	cp $(TARGET)-min.elf $(ISO_DIR)/CLASSICU.ELF
+	xorriso -as mkisofs -quiet -iso-level 1 -sysid PLAYSTATION -V CLASSICUBE -o $@ $(ISO_DIR)
+
+iso: $(TARGET).iso
 
 
 #---------------------------------------------------------------------------------

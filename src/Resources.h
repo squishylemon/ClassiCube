@@ -36,6 +36,12 @@ void Fetcher_Run(void);
 /* Checks if any resources have finished downloading. */
 /* If any have, performs required patching and saving. */
 void Fetcher_Update(void);
+/* Stops downloading resources, and frees any partially processed resources */
+void Fetcher_Cancel(void);
+#ifdef CC_BUILD_COMPACTMUSIC
+/* Returns the name of the music currently being converted (or NULL if none), and how far along it is */
+const char* Fetcher_GetConverting(int* progress);
+#endif
 
 CC_END_HEADER
 #endif

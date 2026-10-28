@@ -109,6 +109,12 @@ CC_API void TexturePack_Extract(const cc_string* url);
 
 typedef cc_result (*DefaultZipCallback)(const cc_string* path);
 cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** default_path);
+#ifdef CC_BUILD_BUNDLED_TEXTURES
+struct Stream;
+/* If path is texpacks/classicube.zip, opens the ClassiCube textures that are built into the executable */
+/* NOTE: Used as a fallback when that file is missing, e.g. no network to download it with */
+cc_bool TexturePack_OpenBundled(struct Stream* stream, const cc_string* path);
+#endif
 
 struct TextureEntry;
 struct TextureEntry {

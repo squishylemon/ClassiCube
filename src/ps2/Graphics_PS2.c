@@ -45,7 +45,7 @@ extern void LoadViewportScale(VU0_vector* scale);
 // NOTE: When a buffer fills up, it's flushed mid-frame (see EnsureDMASpace),
 //  so this only needs to be big enough for a worst case batch (MAX_BATCH_QWORDS)
 static qword_t  dma_bufs[2][16384] CACHELINE_ALIGNED;
-static qword_t* cur_buf;
+static int cur_dma;
 static int cur_context;
 
 static qword_t* dma_beg;
@@ -74,10 +74,12 @@ static void Gfx_FreeState(void) {
 static void UpdateContext(void) {
 	fb_display = &fb_colors[cur_context];
 	fb_draw    = &fb_colors[cur_context ^ 1];
+}
 
-	cur_buf = dma_bufs[cur_context];
-	
-	dma_beg = cur_buf;
+// Commands are written into one DMA buffer while the other is being sent to the GS
+static void SwapDMABuffer(void) {
+	cur_dma ^= 1;
+	dma_beg  = dma_bufs[cur_dma];
 	// increment past the dmatag itself
 	Q = dma_beg + 1;
 }
@@ -254,12 +256,60 @@ static void InitGPUState(void) {
 	InitTextureMem();
 }
 
+
+/*########################################################################################################################*
+*---------------------------------------------------------Presenting------------------------------------------------------*
+*#########################################################################################################################*/
+// With vsync, finished frames are displayed from the vblank interrupt, instead of the
+//  EE waiting for the GS to finish drawing and then for vblank before starting the next frame.
+// This lets the EE work on the next frame while the GS is still drawing the current one
+static volatile int flip_pending = -1; // index into fb_colors of frame waiting to be displayed
+static int vsync_handler = -1;
+
+static void DisplayFramebuffer(framebuffer_t* fb) {
+	graph_set_framebuffer_filtered(fb->address, fb->width, fb->psm, 0, 0);
+}
+
+static int VSyncHandler(int cause) {
+	// Only display the frame once GS has finished drawing all of it
+	if (flip_pending >= 0 && (GS_CSR & GS_CSR_FINISH)) {
+		GS_CSR = GS_CSR_FINISH; // reset 'finish signalled' flag
+		DisplayFramebuffer(&fb_colors[flip_pending]);
+		flip_pending = -1;
+	}
+
+	ExitHandler();
+	return 0;
+}
+
+static void WaitForPendingFlip(void) {
+	if (flip_pending < 0) return;
+	cc_uint64 beg = Stopwatch_Measure();
+
+	while (flip_pending >= 0)
+	{
+		if (Stopwatch_ElapsedMS(beg, Stopwatch_Measure()) < 200) continue;
+
+		// Should never happen, but avoid hanging forever if vblank interrupt is missed
+		DI();
+		if (flip_pending >= 0) {
+			GS_wait_draw_finish();
+			DisplayFramebuffer(&fb_colors[flip_pending]);
+			flip_pending = -1;
+		}
+		EI();
+	}
+}
+
 void Gfx_Create(void) {
 	if (!Gfx.Created) InitGPUState();
+	if (vsync_handler < 0) vsync_handler = graph_add_vsync_handler(VSyncHandler);
 
 	cur_context = 0;
 	UpdateContext();
-	
+	cur_dma = 1;
+	SwapDMABuffer();
+
 	stateDirty  = true;
 	formatDirty = true;
 	InitDrawingEnv();
@@ -279,18 +329,26 @@ void Gfx_Create(void) {
 	Gfx.NonPowTwoTexturesSupport = GFX_NONPOW2_UPLOAD;
 }
 
-void Gfx_Free(void) { 
+void Gfx_Free(void) {
 	Gfx_FreeState();
+	WaitForPendingFlip();
+
+	if (vsync_handler >= 0) graph_remove_vsync_handler(vsync_handler);
+	vsync_handler = -1;
 }
 
+// Starts sending the queued commands to the GS, without waiting for that to complete
 static void FlushMainDMABuffer(void) {
+	// Next frame is drawn into the framebuffer that's still being displayed
+	WaitForPendingFlip();
+	// Previous DMA transfer must complete before starting another one,
+	//  which also means the other DMA buffer is now free to be reused
 	dma_wait_fast();
 
-	if (Q != dma_beg + 1) {
-		DMATAG_END(dma_beg, (Q - dma_beg) - 1, 0, 0, 0);
-		dma_channel_send_chain(DMA_CHANNEL_GIF, dma_beg, Q - dma_beg, 0, 0);
-	}
-	Q = dma_beg + 1;
+	if (Q == dma_beg + 1) return;
+	DMATAG_END(dma_beg, (Q - dma_beg) - 1, 0, 0, 0);
+	dma_channel_send_chain(DMA_CHANNEL_GIF, dma_beg, Q - dma_beg, 0, 0);
+	SwapDMABuffer();
 }
 
 
@@ -423,6 +481,8 @@ void Gfx_TransferPixels(void* src, int width, int height,
 						int format, unsigned dst_base, unsigned dst_stride) {
 	qword_t buf[200] CACHELINE_ALIGNED;
 	qword_t* q = buf;
+	// GS may still be drawing previous frame
+	WaitForPendingFlip();
 
 	q = PrepareTransfer(q, src, width, height, format, dst_base, dst_stride);
 	dma_channel_send_chain(DMA_CHANNEL_GIF, buf, q - buf, 0,0);
@@ -1167,6 +1227,12 @@ void Gfx_CalcOrthoMatrix(struct Matrix* matrix, float width, float height, float
 
 static float Cotangent(float x) { return Math_CosF(x) / Math_SinF(x); }
 void Gfx_CalcPerspectiveMatrix(struct Matrix* matrix, float fov, float aspect, float zFar) {
+	// Chunks are drawn if their centre is within roughly view distance + 24 blocks of the centre of the
+	//  camera's chunk, so parts of them can be up to ~52 blocks beyond the far plane. Quads crossing the
+	//  far plane need slow clipping in C instead of the fast VU0 path, so push far plane out past
+	//  the furthest chunk instead. (beyond view distance is entirely fogged anyway)
+	zFar += 64.0f;
+
 	// Swap zNear/zFar since PS2 only supports GREATER or GEQUAL depth comparison modes
 	float zNear_ = zFar;
 	float zFar_  = 0.1f;
@@ -1478,11 +1544,11 @@ static qword_t* DrawColouredTriangles(qword_t* q, int verticesCount, int startVe
 // Ensures there is enough space in the DMA buffer for the given number of qwords
 static void EnsureDMASpace(int qwords) {
 	// +64 for any other GS state changes that come before end of frame
-	if ((Q - cur_buf) + qwords + 64 < DMA_BUFFER_QWORDS) return;
+	if ((Q - dma_beg) + qwords + 64 < DMA_BUFFER_QWORDS) return;
 
-	// Too much geometry for the DMA buffer, so need to stall and flush it
+	// Too much geometry for the DMA buffer, so start sending it
+	//  and carry on in the other DMA buffer while GS is drawing
 	FlushMainDMABuffer();
-	dma_wait_fast();
 }
 
 static void DrawTriangles(int verticesCount, int startVertex) {
@@ -1657,25 +1723,25 @@ void Gfx_BeginFrame(void) {
 }
 
 void Gfx_EndFrame(void) {
-	//Platform_LogConst("--- EF1 ---");
+	// Make sure 'finish signalled' flag is only set once this frame has been drawn
+	WaitForPendingFlip();
+	GS_CSR = GS_CSR_FINISH;
+
 	Q = GS_DrawFinish(Q);
-	
 	FlushMainDMABuffer();
-	//Platform_LogConst("--- EF2 ---");
-		
-	GS_wait_draw_finish();
-	//Platform_LogConst("--- EF3 ---");
-	if (gfx_vsync) GS_wait_vsync();
-	
-	cur_context ^= 1;
-	UpdateContext();
+
+	if (gfx_vsync && vsync_handler >= 0) {
+		// Displayed by VSyncHandler once GS has finished drawing
+		flip_pending = cur_context ^ 1;
+	} else {
+		GS_wait_draw_finish();
+		DisplayFramebuffer(fb_draw);
+	}
 
 	// Double buffering
+	cur_context ^= 1;
+	UpdateContext();
 	Q = GS_SetFrameBuffer(Q, fb_draw, 0);
-	graph_set_framebuffer_filtered(fb_display->address,
-                                   fb_display->width,
-                                   fb_display->psm, 0, 0);
-	//Platform_LogConst("--- EF4 ---");
 }
 
 void Gfx_SetVSync(cc_bool vsync) {

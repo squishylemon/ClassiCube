@@ -281,6 +281,11 @@ CC_API cc_result Directory_Enum(const cc_string* path, void* obj, Directory_Enum
 /* Returns non-zero if the given file exists. */
 int File_Exists(const cc_filepath* path);
 void Directory_GetCachePath(cc_string* path);
+#ifdef CC_BUILD_COMPACTMUSIC
+/* Returns how many kilobytes are free on the device that game data is stored on */
+/* Returns -1 if this is unknown, or is effectively unlimited (e.g. a USB drive) */
+int Directory_GetFreeSpaceKB(void);
+#endif
 
 /* Attempts to create a new (or overwrite) file for writing. */
 /* NOTE: If the file already exists, its contents are discarded. */

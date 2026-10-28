@@ -197,23 +197,80 @@ int File_Exists(const cc_filepath* path) {
 	return fioGetstat(path->buffer, &sb) >= 0 && (sb.mode & FIO_SO_IFREG);
 }
 
-// For some reason fioDread seems to be returning a iox_dirent_t, instead of a io_dirent_t
-// The offset of 'name' in iox_dirent_t is different to 'iox_dirent_t', so naively trying
-// to use entry.name doesn't work
-// TODO: Properly investigate why this is happening
-static char* GetEntryName(char* src) {
-	for (int i = 0; i < 256; i++)
+int Directory_GetFreeSpaceKB(void) {
+	static const cc_string mc0 = String_FromConst("mc0:");
+	static const cc_string mc1 = String_FromConst("mc1:");
+	int port, type = 0, free = 0, format = 0, ret = -1;
+
+	// USB drives and PCSX2's host folder have plenty of room
+	if (String_CaselessStarts(&root_path, &mc0)) {
+		port = 0;
+	} else if (String_CaselessStarts(&root_path, &mc1)) {
+		port = 1;
+	} else {
+		return -1;
+	}
+
+	// Memory cards use 1 KB clusters
+	mcGetInfo(port, 0, &type, &free, &format);
+	mcSync(0, NULL, &ret);
+	return (ret == 0 || ret == -1) ? free : 0;
+}
+
+// Different IOP filesystem drivers return directory entries in different layouts:
+//  - io_dirent_t, with the name at offset 40
+//  - iox_dirent_t (e.g. iomanX based drivers), with the name at offset 64
+//  - PCSX2's host: filesystem, which returns the name at offset 32 (and no usable mode)
+#define DIRENT_NAME_IO   40
+#define DIRENT_NAME_IOX  64
+#define DIRENT_NAME_HOST 32
+union DirEntry { io_dirent_t io; cc_uint8 raw[512]; };
+
+static cc_bool IsEntryName(const cc_uint8* src) {
+	int i;
+	if (!src[0] || src[-1]) return false; // must be a NUL terminated string on its own
+
+	for (i = 0; i < 256 && src[i]; i++)
 	{
-		if (src[i]) return &src[i];
+		if (src[i] < ' ') return false;
+	}
+	return i < 256;
+}
+
+static char* GetEntryName(union DirEntry* entry, int* offset) {
+	static const int offsets[] = { DIRENT_NAME_IO, DIRENT_NAME_IOX, DIRENT_NAME_HOST };
+	int i;
+
+	for (i = 0; i < Array_Elems(offsets); i++)
+	{
+		*offset = offsets[i];
+		if (IsEntryName(entry->raw + *offset)) return (char*)entry->raw + *offset;
+	}
+
+	// Unknown layout, so fallback to first non-empty character after io_dirent_t name offset
+	for (i = DIRENT_NAME_IO; i < DIRENT_NAME_IO + 256; i++)
+	{
+		*offset = i;
+		if (entry->raw[i]) return (char*)entry->raw + i;
 	}
 	return NULL;
+}
+
+static int IsEntryDirectory(union DirEntry* entry, int offset, const cc_string* path) {
+	cc_filepath str;
+	io_stat_t sb;
+	if (offset != DIRENT_NAME_HOST) return FIO_SO_ISDIR(entry->io.stat.mode);
+
+	// Mode isn't returned in this layout, so have to query it separately
+	Platform_EncodePath(&str, path);
+	return fioGetstat(str.buffer, &sb) >= 0 && FIO_SO_ISDIR(sb.mode);
 }
 
 cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCallback callback) {
 	cc_string path; char pathBuffer[FILENAME_SIZE];
 	cc_filepath str;
-	io_dirent_t entry;
-	int fd, res;
+	union DirEntry entry;
+	int fd, res, offset;
 
 	Platform_EncodePath(&str, dirPath);
 	fd = fioDopen(str.buffer);
@@ -221,13 +278,15 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 	
 	res = 0;
 	String_InitArray(path, pathBuffer);
-	Mem_Set(&entry, 0, sizeof(entry));
 
-	while ((res = fioDread(fd, &entry)) > 0) {
+	for (;;) {
+		Mem_Set(&entry, 0, sizeof(entry));
+		if ((res = fioDread(fd, &entry.io)) <= 0) break;
+
 		path.length = 0;
 		String_Format1(&path, "%s/", dirPath);
 
-		char* src = GetEntryName(entry.name);
+		char* src = GetEntryName(&entry, &offset);
 		if (!src) continue;
 
 		// ignore . and .. entry
@@ -237,7 +296,7 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 		int len = String_Length(src);
 		String_AppendUtf8(&path, src, len);
 
-		int is_dir = FIO_SO_ISDIR(entry.stat.mode);
+		int is_dir = IsEntryDirectory(&entry, offset, &path);
 		callback(&path, obj, is_dir);
 	}
 
@@ -437,8 +496,15 @@ void Waitable_Wait(void* handle) {
 }
 
 void Waitable_WaitFor(void* handle, cc_uint32 milliseconds) {
-	Process_Abort("Can't wait for");
-	// TODO implement support
+	int semID = (int)handle;
+	cc_uint32 waited;
+
+	// Poll in small steps, as there's no simple wait with timeout
+	for (waited = 0; waited < milliseconds; waited += 10)
+	{
+		if (PollSema(semID) >= 0) return;
+		Thread_Sleep(10);
+	}
 }
 
 
@@ -770,15 +836,12 @@ static cc_bool TryUseRoot(const char* root) {
 	cc_result res     = Directory_Create2(path);
 	int fd;
 
-	if (res && res != ReturnCode_DirectoryExists) {
-		Platform_Log2("Can't use %c as root directory: %e", root, &res);
-		return false;
-	}
-
 	// Make sure the directory can actually be accessed
+	// NOTE: Creating can 'fail' just because it already exists, as e.g. MCMAN
+	//  returns -4 instead of an 'already exists' error, so always check this
 	fd = fioDopen(root);
 	if (fd < 0) {
-		Platform_Log2("Can't open %c as root directory: %i", root, &fd);
+		Platform_Log3("Can't use %c as root directory: %e (open %i)", root, &res, &fd);
 		return false;
 	}
 	fioDclose(fd);

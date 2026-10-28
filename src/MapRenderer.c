@@ -534,7 +534,15 @@ static void RefreshBorderChunks(int maxHeight) {
 /*########################################################################################################################*
 *--------------------------------------------------Chunks updating/sorting------------------------------------------------*
 *#########################################################################################################################*/
+#ifdef CC_BUILD_PS2
+/* Building a chunk takes several milliseconds, so only build more chunks per frame */
+/*  when there's time to spare, and allow building fewer when frame rate is low */
+#define CHUNK_TARGET_TIME 0.030f
+#define MIN_CHUNK_UPDATES 1
+#else
 #define CHUNK_TARGET_TIME ((1.0f/30) + 0.01f)
+#define MIN_CHUNK_UPDATES 4
+#endif
 static int chunksTarget = 12;
 static Vec3 lastCamPos;
 static float lastYaw, lastPitch;
@@ -545,10 +553,18 @@ static int renderDistSquared;
 /* Chunks past this distance are automatically unloaded */
 static int buildDistSquared;
 
+#ifdef CC_BUILD_PS2
+/* Fog is almost opaque at view distance, so don't waste time drawing chunks */
+/*  that would be (nearly) entirely fogged anyway */
+#define CHUNK_DIST_MARGIN 8
+#else
+#define CHUNK_DIST_MARGIN 24
+#endif
+
 static int AdjustDist(int dist) {
 	if (dist < CHUNK_SIZE) dist = CHUNK_SIZE;
 	dist = Utils_AdjViewDist(dist);
-	return (dist + 24) * (dist + 24);
+	return (dist + CHUNK_DIST_MARGIN) * (dist + CHUNK_DIST_MARGIN);
 }
 
 static void CalcViewDists(void) {
@@ -638,7 +654,7 @@ static void UpdateChunks(float delta) {
 
 	/* Build more chunks if 30 FPS or over, otherwise slowdown */
 	chunksTarget += delta < CHUNK_TARGET_TIME ? 1 : -1; 
-	Math_Clamp(chunksTarget, 4, maxChunkUpdates);
+	Math_Clamp(chunksTarget, MIN_CHUNK_UPDATES, maxChunkUpdates);
 
 	p = Entities.CurPlayer;
 	samePos = Vec3_Equals(&Camera.CurrentPos, &lastCamPos)

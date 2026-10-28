@@ -475,6 +475,9 @@ static cc_result ExtractTexturePack(const cc_string* path) {
 
 	Platform_EncodePath(&raw_path, path);
 	res = Stream_OpenPath(&stream, &raw_path);
+#ifdef CC_BUILD_BUNDLED_TEXTURES
+	if (ReturnCode_IsNotFound(res) && TexturePack_OpenBundled(&stream, path)) res = 0;
+#endif
 
 	if (ReturnCode_IsNotFound(res)) return res;
 	if (res) { Logger_SysWarn(res, "opening texture pack"); return res; }

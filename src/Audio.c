@@ -215,6 +215,11 @@ static void Audio_PlayBlockSound(void* obj, IVec3 coords, BlockID old, BlockID n
 	}
 }
 
+#ifdef CC_BUILD_BUNDLED_SOUNDS
+/* ClassiCube's own sounds */
+CC_EMBED_FILE(ccBundledSounds, "misc/cc_audio.zip")
+#endif
+
 static cc_bool SelectZipEntry(const cc_string* path) { return true; }
 static cc_result ProcessZipEntry(const cc_string* path, struct Stream* stream, struct ZipEntry* source) {
 	static const cc_string dig  = String_FromConst("dig_");
@@ -233,6 +238,14 @@ static cc_result Sounds_ExtractZip(const cc_string* path) {
 
 	Platform_EncodePath(&raw_path, path);
 	res = Stream_OpenPath(&stream, &raw_path);
+#ifdef CC_BUILD_BUNDLED_SOUNDS
+	/* Fall back to ClassiCube sounds built into the executable, e.g. when no network to download them */
+	if (ReturnCode_IsNotFound(res) && String_Equals(path, &Sounds_ZipPathCC)) {
+		Stream_ReadonlyMemory(&stream, (void*)ccBundledSounds,
+							(cc_uint32)(ccBundledSoundsEnd - ccBundledSounds));
+		res = 0;
+	}
+#endif
 	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
 
 	res = Zip_Extract(&stream, SelectZipEntry, ProcessZipEntry,
@@ -277,6 +290,63 @@ void Audio_PlayStepSound(cc_uint8 type) { Sounds_Play(type, &stepBoard); }
 #endif
 
 
+#ifdef CC_BUILD_COMPACTMUSIC
+/*########################################################################################################################*
+*--------------------------------------------------------IMA ADPCM--------------------------------------------------------*
+*#########################################################################################################################*/
+static const cc_int16 adpcm_steps[89] = {
+	    7,     8,     9,    10,    11,    12,    13,    14,    16,    17,
+	   19,    21,    23,    25,    28,    31,    34,    37,    41,    45,
+	   50,    55,    60,    66,    73,    80,    88,    97,   107,   118,
+	  130,   143,   157,   173,   190,   209,   230,   253,   279,   307,
+	  337,   371,   408,   449,   494,   544,   598,   658,   724,   796,
+	  876,   963,  1060,  1166,  1282,  1411,  1552,  1707,  1878,  2066,
+	 2272,  2499,  2749,  3024,  3327,  3660,  4026,  4428,  4871,  5358,
+	 5894,  6484,  7132,  7845,  8630,  9493, 10442, 11487, 12635, 13899,
+	15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+static const cc_int8 adpcm_indices[8] = { -1, -1, -1, -1, 2, 4, 6, 8 };
+
+static void Adpcm_Update(struct AdpcmState* s, int nibble, int delta) {
+	int pred  = s->predictor + ((nibble & 8) ? -delta : delta);
+	int index = s->index + adpcm_indices[nibble & 7];
+
+	s->predictor = max(-32768, min(32767, pred));
+	s->index     = max(0, min(88, index));
+}
+
+int Adpcm_EncodeSample(struct AdpcmState* s, int sample) {
+	int step   = adpcm_steps[s->index];
+	int diff   = sample - s->predictor;
+	int delta  = step >> 3;
+	int nibble = 0;
+
+	if (diff < 0) { nibble = 8; diff = -diff; }
+	if (diff >= step) { nibble |= 4; diff -= step; delta += step; }
+	step >>= 1;
+	if (diff >= step) { nibble |= 2; diff -= step; delta += step; }
+	step >>= 1;
+	if (diff >= step) { nibble |= 1; delta += step; }
+
+	/* Track the predictor exactly as the decoder will */
+	Adpcm_Update(s, nibble, delta);
+	return nibble;
+}
+
+int Adpcm_DecodeSample(struct AdpcmState* s, int nibble) {
+	int step  = adpcm_steps[s->index];
+	int delta = step >> 3;
+
+	if (nibble & 4) delta += step;
+	if (nibble & 2) delta += step >> 1;
+	if (nibble & 1) delta += step >> 2;
+
+	Adpcm_Update(s, nibble, delta);
+	return s->predictor;
+}
+#endif
+
+
 /*########################################################################################################################*
 *--------------------------------------------------------Music------------------------------------------------------------*
 *#########################################################################################################################*/
@@ -295,17 +365,17 @@ static void* music_waitable;
 static volatile cc_bool music_stopping, music_joining;
 static int music_minDelay, music_maxDelay;
 
-static cc_result Music_Buffer(struct AudioChunk* chunk, int maxSamples, struct VorbisState* ctx) {
-	int samples = 0;
-	cc_int16* cur;
+/* Decodes the next frame of audio, outputting the number of samples decoded */
+typedef cc_result (*Music_DecodeFrame)(void* obj, cc_int16* data, int* samples);
+
+static cc_result Music_Buffer(struct AudioChunk* chunk, int maxSamples, Music_DecodeFrame decode, void* obj) {
+	int samples = 0, count;
 	cc_result res = 0, res2;
 	cc_int16* data = (cc_int16*)chunk->data;
 
 	while (samples < maxSamples) {
-		if ((res = Vorbis_DecodeFrame(ctx))) break;
-
-		cur = &data[samples];
-		samples += Vorbis_OutputFrame(ctx, cur);
+		if ((res = decode(obj, &data[samples], &count))) break;
+		samples += count;
 	}
 
 	chunk->size = samples * 2;
@@ -314,36 +384,19 @@ static cc_result Music_Buffer(struct AudioChunk* chunk, int maxSamples, struct V
 	return res;
 }
 
-static cc_result Music_PlayOgg(struct Stream* source) {
-	int channels, sampleRate, volume;
-	int chunkSize, samplesPerSecond;
+/* Plays audio from the given decoder, until either the end of the audio is reached or music is stopped */
+/* frameSamples is the maximum number of samples that a single decoded frame can contain */
+static cc_result Music_Stream(int channels, int sampleRate, int frameSamples, Music_DecodeFrame decode, void* obj) {
+	int volume, chunkSize, samplesPerSecond;
 	struct AudioChunk chunks[AUDIO_MAX_BUFFERS] = { 0 };
 	int inUse, i, cur;
 	cc_result res;
 
-#if CC_BUILD_MAXSTACK <= (64 * 1024)
-	struct VorbisState* vorbis = (struct VorbisState*)Mem_TryAllocCleared(1, sizeof(struct VorbisState));
-	struct OggState* ogg = (struct OggState*)Mem_TryAllocCleared(1, sizeof(struct OggState));
-	if (!vorbis || !ogg) return ERR_OUT_OF_MEMORY;
-#else
-	struct OggState _ogg;
-	struct OggState* ogg = &_ogg;
-	struct VorbisState _vorbis;
-	struct VorbisState* vorbis = &_vorbis;
-#endif
+	if ((res = StreamContext_SetFormat(&music_ctx, channels, sampleRate, 100))) return res;
 
-	Ogg_Init(ogg, source);
-	Vorbis_Init(vorbis);
-	vorbis->source = ogg;
-	if ((res = Vorbis_DecodeHeaders(vorbis))) goto cleanup;
-	
-	channels   = vorbis->channels;
-	sampleRate = vorbis->sampleRate;
-	if ((res = StreamContext_SetFormat(&music_ctx, channels, sampleRate, 100))) goto cleanup;
-
-	/* largest possible vorbis frame decodes to blocksize1 * channels samples, */
+	/* the last frame can end up going over, */
 	/*  so can end up decoding slightly over a second of audio */
-	chunkSize        = channels * (sampleRate + vorbis->blockSizes[1]);
+	chunkSize        = channels * sampleRate + frameSamples;
 	samplesPerSecond = channels * sampleRate;
 
 	if ((res = Audio_AllocChunks(chunkSize * 2, chunks, AUDIO_MAX_BUFFERS))) goto cleanup;
@@ -353,7 +406,7 @@ static cc_result Music_PlayOgg(struct Stream* source) {
 	/* fill up with some samples before playing */
 	for (i = 0; i < AUDIO_MAX_BUFFERS && !res; i++) 
 	{
-		res = Music_Buffer(&chunks[i], samplesPerSecond, vorbis);
+		res = Music_Buffer(&chunks[i], samplesPerSecond, decode, obj);
 	}
 	if (music_stopping) goto cleanup;
 
@@ -385,7 +438,7 @@ static cc_result Music_PlayOgg(struct Stream* source) {
 			Thread_Sleep(10); continue;
 		}
 
-		res = Music_Buffer(&chunks[cur], samplesPerSecond, vorbis);
+		res = Music_Buffer(&chunks[cur], samplesPerSecond, decode, obj);
 		cur = (cur + 1) % AUDIO_MAX_BUFFERS;
 
 		/* need to specially handle last bit of audio */
@@ -407,6 +460,39 @@ static cc_result Music_PlayOgg(struct Stream* source) {
 
 cleanup:
 	Audio_FreeChunks(chunks, AUDIO_MAX_BUFFERS);
+	return res;
+}
+
+static cc_result Music_DecodeVorbis(void* obj, cc_int16* data, int* samples) {
+	struct VorbisState* ctx = (struct VorbisState*)obj;
+	cc_result res = Vorbis_DecodeFrame(ctx);
+	if (res) return res;
+
+	*samples = Vorbis_OutputFrame(ctx, data);
+	return 0;
+}
+
+static cc_result Music_PlayOgg(struct Stream* source) {
+	cc_result res;
+#if CC_BUILD_MAXSTACK <= (64 * 1024)
+	struct VorbisState* vorbis = (struct VorbisState*)Mem_TryAllocCleared(1, sizeof(struct VorbisState));
+	struct OggState* ogg = (struct OggState*)Mem_TryAllocCleared(1, sizeof(struct OggState));
+	if (!vorbis || !ogg) { Mem_Free(vorbis); Mem_Free(ogg); return ERR_OUT_OF_MEMORY; }
+#else
+	struct OggState _ogg;
+	struct OggState* ogg = &_ogg;
+	struct VorbisState _vorbis;
+	struct VorbisState* vorbis = &_vorbis;
+#endif
+
+	Ogg_Init(ogg, source);
+	Vorbis_Init(vorbis);
+	vorbis->source = ogg;
+
+	res = Vorbis_DecodeHeaders(vorbis);
+	if (!res) res = Music_Stream(vorbis->channels, vorbis->sampleRate,
+								vorbis->blockSizes[1] * vorbis->channels, Music_DecodeVorbis, vorbis);
+
 	Vorbis_Free(vorbis);
 #if CC_BUILD_MAXSTACK <= (64 * 1024)
 	Mem_Free(ogg);
@@ -415,15 +501,114 @@ cleanup:
 	return res == ERR_END_OF_STREAM ? 0 : res;
 }
 
+#ifdef CC_BUILD_COMPACTMUSIC
+#define WAV_FourCC(a, b, c, d) (((cc_uint32)a << 24) | ((cc_uint32)b << 16) | ((cc_uint32)c << 8) | (cc_uint32)d)
+#define WAV_FMT_IMA_ADPCM 0x11
+
+struct AdpcmDecoder {
+	struct Stream* source;
+	cc_uint32 left; /* Number of bytes of sample data left */
+	cc_uint8 block[ADPCM_BLOCK_ALIGN];
+};
+
+static cc_result Music_DecodeAdpcm(void* obj, cc_int16* data, int* samples) {
+	struct AdpcmDecoder* d = (struct AdpcmDecoder*)obj;
+	struct AdpcmState state;
+	cc_uint32 i, size = min(d->left, ADPCM_BLOCK_ALIGN);
+	int count = 1;
+	cc_result res;
+
+	if (size <= 4) return ERR_END_OF_STREAM;
+	if ((res = Stream_Read(d->source, d->block, size))) return res;
+	d->left -= size;
+
+	/* Each block starts with its first sample and the step index */
+	state.predictor = (cc_int16)Mem_ReadU16_LE(d->block);
+	state.index     = min(d->block[2], 88);
+	data[0]         = state.predictor;
+
+	for (i = 4; i < size; i++)
+	{
+		data[count++] = Adpcm_DecodeSample(&state, d->block[i] & 0x0F);
+		data[count++] = Adpcm_DecodeSample(&state, d->block[i] >> 4);
+	}
+	*samples = count;
+	return 0;
+}
+
+/* Plays a mono IMA ADPCM .wav file, as produced when music is fetched */
+static cc_result Music_PlayWav(struct Stream* source) {
+	cc_uint8 header[16];
+	struct AdpcmDecoder* d;
+	struct Stream stream;
+	cc_uint32 fourCC, size;
+	int sampleRate = 0;
+	cc_result res;
+
+	/* Memory card reads are slow, so read in large batches */
+	d = (struct AdpcmDecoder*)Mem_TryAlloc(1, sizeof(struct AdpcmDecoder) + 8192);
+	if (!d) return ERR_OUT_OF_MEMORY;
+	Stream_ReadonlyBuffered(&stream, source, d + 1, 8192);
+	d->source = &stream;
+
+	if ((res = Stream_Read(&stream, header, 12))) goto cleanup;
+	if (Mem_ReadU32_BE(header + 0) != WAV_FourCC('R','I','F','F')) { res = WAV_ERR_STREAM_HDR;  goto cleanup; }
+	if (Mem_ReadU32_BE(header + 8) != WAV_FourCC('W','A','V','E')) { res = WAV_ERR_STREAM_TYPE; goto cleanup; }
+
+	for (;;) {
+		if ((res = Stream_Read(&stream, header, 8))) goto cleanup;
+		fourCC = Mem_ReadU32_BE(header + 0);
+		size   = Mem_ReadU32_LE(header + 4);
+		if (fourCC == WAV_FourCC('d','a','t','a')) break;
+
+		if (fourCC == WAV_FourCC('f','m','t',' ') && size >= 16) {
+			if ((res = Stream_Read(&stream, header, 16))) goto cleanup;
+			size -= 16;
+
+			if (Mem_ReadU16_LE(header + 0)  != WAV_FMT_IMA_ADPCM || Mem_ReadU16_LE(header + 2) != 1 ||
+				Mem_ReadU16_LE(header + 12) != ADPCM_BLOCK_ALIGN) { res = WAV_ERR_DATA_TYPE; goto cleanup; }
+			sampleRate = (int)Mem_ReadU32_LE(header + 4);
+		}
+
+		/* Skip over rest of the chunk (chunks are padded to an even size) */
+		if ((res = stream.Skip(&stream, size + (size & 1)))) goto cleanup;
+	}
+
+	if (!sampleRate) { res = WAV_ERR_DATA_TYPE; goto cleanup; }
+	d->left = size;
+	res = Music_Stream(1, sampleRate, ADPCM_BLOCK_SAMPLES, Music_DecodeAdpcm, d);
+
+cleanup:
+	Mem_Free(d);
+	return res == ERR_END_OF_STREAM ? 0 : res;
+}
+#endif
+
 static void Music_AddFile(const cc_string* path, void* obj, int isDirectory) {
 	struct StringsBuffer* files = (struct StringsBuffer*)obj;
 	static const cc_string ogg  = String_FromConst(".ogg");
+#ifdef CC_BUILD_COMPACTMUSIC
+	static const cc_string wav  = String_FromConst(".wav");
+#endif
 
 	if (isDirectory) {
 		Directory_Enum(path, obj, Music_AddFile);
 	} else if (String_CaselessEnds(path, &ogg)) {
 		StringsBuffer_Add(files, path);
 	}
+#ifdef CC_BUILD_COMPACTMUSIC
+	else if (String_CaselessEnds(path, &wav)) {
+		StringsBuffer_Add(files, path);
+	}
+#endif
+}
+
+static cc_result Music_PlayFile(const cc_string* path, struct Stream* stream) {
+#ifdef CC_BUILD_COMPACTMUSIC
+	static const cc_string wav = String_FromConst(".wav");
+	if (String_CaselessEnds(path, &wav)) return Music_PlayWav(stream);
+#endif
+	return Music_PlayOgg(stream);
 }
 
 static void Music_RunLoop(void) {
@@ -452,7 +637,7 @@ static void Music_RunLoop(void) {
 		res = Stream_OpenPath(&stream, &raw_path);
 		if (res) { Logger_IOWarn2(res, "opening", &raw_path); break; }
 
-		res = Music_PlayOgg(&stream);
+		res = Music_PlayFile(&path, &stream);
 		if (res) { Logger_SimpleWarn2(res, "playing", &path); }
 
 		/* No point logging error for closing readonly file */
@@ -478,9 +663,9 @@ static void Music_RunLoop(void) {
 static void Music_Start(void) {
 	if (music_thread) return;
 	if (!AudioBackend_Init()) {
-		AudioBackend_Free(); 
+		AudioBackend_Free();
 		Audio_MusicVolume = 0;
-		return; 
+		return;
 	}
 
 	music_joining  = false;

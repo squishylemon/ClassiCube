@@ -53,19 +53,31 @@ static void MixContext(struct AudioContext* ctx, cc_int32* dst, int frames) {
 		struct AudioBuffer* buf = &ctx->bufs[ctx->head];
 		cc_int16* src   = buf->samples;
 		cc_uint32 total = buf->frames << 16;
+		cc_uint32 last  = buf->frames - 1;
 
-		// Nearest neighbour resampling to output frequency
+		// Linear interpolation resampling to output frequency
+		// (nearest neighbour sounds harsh when upsampling low sample rate music)
 		if (ctx->channels == 2) {
 			for (; frames > 0 && ctx->pos < total; frames--, dst += 2, ctx->pos += ctx->step)
 			{
-				int i = (ctx->pos >> 16) * 2;
-				dst[0] += (src[i + 0] * vol) >> 8;
-				dst[1] += (src[i + 1] * vol) >> 8;
+				cc_uint32 f = ctx->pos >> 16;
+				int frac = (ctx->pos & 0xFFFF) >> 1;
+				int i = f * 2, j = (f < last ? f + 1 : f) * 2;
+
+				int l = src[i + 0] + (((src[j + 0] - src[i + 0]) * frac) >> 15);
+				int r = src[i + 1] + (((src[j + 1] - src[i + 1]) * frac) >> 15);
+				dst[0] += (l * vol) >> 8;
+				dst[1] += (r * vol) >> 8;
 			}
 		} else {
 			for (; frames > 0 && ctx->pos < total; frames--, dst += 2, ctx->pos += ctx->step)
 			{
-				int s = (src[ctx->pos >> 16] * vol) >> 8;
+				cc_uint32 f = ctx->pos >> 16;
+				int frac = (ctx->pos & 0xFFFF) >> 1;
+				int j = f < last ? f + 1 : f;
+
+				int s = src[f] + (((src[j] - src[f]) * frac) >> 15);
+				s = (s * vol) >> 8;
 				dst[0] += s;
 				dst[1] += s;
 			}
@@ -139,6 +151,9 @@ cc_bool AudioBackend_Init(void) {
 	ee_thread_status_t info;
 	ee_thread_t thread = { 0 };
 	int ret;
+	// Called by both sounds and music, but the mixer thread must only be started once
+	//  (a second one would end up running on the same stack)
+	if (mix_thread > 0) return true;
 
 	if (!LoadAudioModules()) return false;
 	if ((ret = audsrv_init())) {
@@ -166,6 +181,7 @@ cc_bool AudioBackend_Init(void) {
 	thread.gp_reg           = &_gp;
 	thread.initial_priority = max(0, info.current_priority - 1);
 
+	mix_stop   = false;
 	mix_thread = CreateThread(&thread);
 	if (mix_thread < 0) return false;
 	StartThread(mix_thread, NULL);
@@ -175,7 +191,8 @@ cc_bool AudioBackend_Init(void) {
 void AudioBackend_Tick(void) { }
 
 void AudioBackend_Free(void) {
-	mix_stop = true;
+	mix_stop   = true;
+	mix_thread = 0;
 	audsrv_quit();
 }
 

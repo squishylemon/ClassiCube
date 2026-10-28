@@ -49,6 +49,8 @@ extern cc_string Game_Mppass;
 	#define DEFAULT_VIEWDIST 64
 #elif defined CC_BUILD_NDS
     #define DEFAULT_VIEWDIST 192
+#elif defined CC_BUILD_PS2
+    #define DEFAULT_VIEWDIST 48 /* Every vertex is transformed by the CPU, so draw less */
 #else
     #define DEFAULT_VIEWDIST 512
 #endif

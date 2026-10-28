@@ -1240,8 +1240,8 @@ static int ChatScreen_KeyDown(void* screen, int key, struct InputDevice* device)
 		if (InputBind_Claims(BIND_SEND_CHAT, key, device) || key == CCKEY_KP_ENTER) {
 			ChatScreen_EnterChatInput(s, false);
 #else
-		if (InputBind_Claims(BIND_SEND_CHAT, key, device) || key == CCKEY_KP_ENTER || key == device->escapeButton) {
-			ChatScreen_EnterChatInput(s, key == device->escapeButton);
+		if (InputBind_Claims(BIND_SEND_CHAT, key, device) || key == CCKEY_KP_ENTER || InputDevice_IsBack(key, device)) {
+			ChatScreen_EnterChatInput(s, InputDevice_IsBack(key, device));
 #endif
 		} else if (key == device->pageUpButton) {
 			ChatScreen_ScrollChatBy(s, -Gui.Chatlines);
