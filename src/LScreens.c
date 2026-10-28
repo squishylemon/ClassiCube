@@ -845,9 +845,17 @@ static void MainScreen_ApplyUpdateLabel(struct MainScreen* s) {
 	}
 }
 
+#ifdef CC_BUILD_PS2
+/* No Exit button, as there's nothing sensible to exit back to */
+#define MainScreen_HasExit() false
+#define MainScreen_ExitApp NULL
+#else
+#define MainScreen_HasExit() (Platform_Flags & PLAT_FLAG_APP_EXIT)
+
 static void MainScreen_ExitApp(void* w) {
 	Window_Main.Exists = false;
 }
+#endif
 
 static void MainScreen_Activated(struct LScreen* s_) {
 	struct MainScreen* s = (struct MainScreen*)s_;
@@ -884,7 +892,7 @@ static void MainScreen_Activated(struct LScreen* s_) {
 	LButton_Add(s, &s->btnOptions, 100, 35, "Options", 
 				SwitchToSettings, main_btnOptions);
 
-	if (Platform_Flags & PLAT_FLAG_APP_EXIT) {
+	if (MainScreen_HasExit()) {
 		LLabel_Add(s,  &s->lblUpdate,  "&eChecking..", main_lblUpdate_N);
 		LButton_Add(s, &s->btnUpdates,  100, 35, "Exit", 
 					MainScreen_ExitApp, main_btnUpdates);

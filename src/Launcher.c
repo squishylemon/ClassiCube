@@ -361,7 +361,12 @@ void LauncherTheme_Load(struct LauncherTheme* theme) {
 		return;
 	}
 	*theme = Launcher_ModernTheme;
+#ifdef CC_BUILD_PS2
+	/* Draw background using the texture pack's images (downloaded or built-in) by default */
+	theme->ClassicBackground = Options_GetBool("nostalgia-classicbg", true);
+#else
 	theme->ClassicBackground = Options_GetBool("nostalgia-classicbg", false);
+#endif
 
 	ParseColor("launcher-back-col",                   &theme->BackgroundColor);
 	ParseColor("launcher-btn-border-col",             &theme->ButtonBorderColor);
