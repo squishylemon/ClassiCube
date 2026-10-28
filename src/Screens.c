@@ -359,8 +359,8 @@ static void HUDScreen_BuildCrosshairsMesh(struct VertexTextured** ptr) {
 	int extent;
 
 	extent = (int)(CH_EXTENT * Gui_GetCrosshairScale());
-	tex.x  = (Window_Main.Width  / 2) - extent;
-	tex.y  = (Window_Main.Height / 2) - extent;
+	tex.x  = (Gui_AreaWidth()  / 2) - extent;
+	tex.y  = (Gui_AreaHeight() / 2) - extent;
 
 	tex.width  = extent * 2;
 	tex.height = extent * 2;

@@ -287,6 +287,22 @@ void Gui_RefreshAll(void);
 void Gui_Refresh(struct Screen* s);
 void Gui_RenderGui(float delta);
 
+#ifdef CC_BUILD_SPLITSCREEN
+/* Size of the area the GUI is currently being laid out or drawn in */
+/* In splitscreen mode, the HUD is laid out and drawn once per player, within */
+/*  that player's view, while all other screens (menus, chat etc) are laid out */
+/*  and drawn only once across the entire window */
+int Gui_AreaWidth(void);
+int Gui_AreaHeight(void);
+/* Draws only the screens that are drawn once per player (i.e. the HUD) */
+void Gui_RenderPlayerGui(float delta);
+/* Draws only the screens that are drawn once across the entire window */
+void Gui_RenderSharedGui(float delta);
+#else
+#define Gui_AreaWidth()  Window_Main.Width
+#define Gui_AreaHeight() Window_Main.Height
+#endif
+
 #define TEXTATLAS_MAX_WIDTHS 16
 struct TextAtlas {
 	struct Texture tex;

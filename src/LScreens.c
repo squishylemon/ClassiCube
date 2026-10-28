@@ -872,7 +872,7 @@ static void MainScreen_Activated(struct LScreen* s_) {
 	LButton_Add(s, &s->btnSPlayer, 200, 35, "Singleplayer",
 				MainScreen_Singleplayer, main_btnSPlayer);
 #ifdef CC_BUILD_SPLITSCREEN
-	LButton_Add(s, &s->btnSplit,   200, 35, "Splitscreen (WIP)", 
+	LButton_Add(s, &s->btnSplit,   200, 35, "Splitscreen", 
 				SwitchToSplitScreen,     main_btnSplit);
 #endif
 

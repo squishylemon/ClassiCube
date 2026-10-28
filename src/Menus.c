@@ -197,7 +197,7 @@ static int Menu_PadAxis(void* screen, struct PadAxisUpdate* upd) {
 }
 
 static void AddPrimaryButton(void* screen, struct ButtonWidget* btn, Widget_LeftClick click) {
-	int width = Game_ClassicMode ? 400 : (Window_Main.Width < 300 ? 200 : 400);
+	int width = Game_ClassicMode ? 400 : (Gui_AreaWidth() < 300 ? 200 : 400);
 	ButtonWidget_Add(screen, btn, width, click);
 }
 

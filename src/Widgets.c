@@ -1872,7 +1872,7 @@ static void ChatInputWidget_Render(void* widget) {
 		caretAtEnd = (w->caretY == i) && (w->caretX == INPUTWIDGET_LEN || w->caretPos == -1);
 		width      = w->lineWidths[i] + (caretAtEnd ? w->caretTex.width : 0);
 		/* Cover whole window width to match Minecraft behaviour */
-		width      = max(width, Window_Main.Width - x * 4);
+		width      = max(width, Gui_AreaWidth() - x * 4);
 	
 		Gfx_Draw2DFlat(x, y, width + w->padding * 2, w->lineHeight, backColor);
 		y += w->lineHeight;
@@ -2127,7 +2127,7 @@ static void TextGroupWidget_Reposition(void* widget) {
 
 	for (i = 0, y = w->y; i < w->lines; i++) 
 	{
-		textures[i].x = Gui_CalcPos(w->horAnchor, w->xOffset, textures[i].width, Window_Main.Width);
+		textures[i].x = Gui_CalcPos(w->horAnchor, w->xOffset, textures[i].width, Gui_AreaWidth());
 		textures[i].y = y;
 		y += textures[i].height;
 	}
@@ -2422,7 +2422,7 @@ void TextGroupWidget_Redraw(struct TextGroupWidget* w, int index) {
 		tex.height = w->collapsible[index] ? 0 : w->defaultHeight;
 	}
 
-	tex.x = Gui_CalcPos(w->horAnchor, w->xOffset, tex.width, Window_Main.Width);
+	tex.x = Gui_CalcPos(w->horAnchor, w->xOffset, tex.width, Gui_AreaWidth());
 	w->textures[index] = tex;
 	Widget_Layout(w);
 }

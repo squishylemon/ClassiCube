@@ -32,9 +32,15 @@ extern cc_string Game_Mppass;
 #ifdef CC_BUILD_SPLITSCREEN
 	int Game_MapState(int deviceIndex);
 	extern int Game_NumStates;
+	/* Size of the area each player's view is drawn in (e.g. half of the window in 2 player splitscreen) */
+	/* NOTE: GUI is laid out and drawn relative to this area, rather than the entire window */
+	int Game_ViewWidth(void);
+	int Game_ViewHeight(void);
 #else
 	static CC_INLINE int Game_MapState(int deviceIndex) { return 0; }
 	#define Game_NumStates 1
+	#define Game_ViewWidth()  Window_Main.Width
+	#define Game_ViewHeight() Window_Main.Height
 #endif
 
 #if defined CC_BUILD_N64 || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN

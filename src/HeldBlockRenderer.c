@@ -1,6 +1,7 @@
 #include "HeldBlockRenderer.h"
 #include "Block.h"
 #include "Game.h"
+#include "Window.h"
 #include "Inventory.h"
 #include "Graphics.h"
 #include "Camera.h"
@@ -108,7 +109,7 @@ static void SetBaseOffset(void) {
 
 static void OnProjectionChanged(void* obj) {
 	float fov = 70.0f * MATH_DEG2RAD;
-	float aspectRatio = (float)Game.Width / (float)Game.Height;
+	float aspectRatio = (float)Game_ViewWidth() / (float)Game_ViewHeight();
 	Gfx_CalcPerspectiveMatrix(&held_blockProj, fov, aspectRatio, (float)Game_ViewDistance);
 }
 
