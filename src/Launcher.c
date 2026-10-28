@@ -34,6 +34,11 @@ cc_bool Launcher_ShowEmptyServers;
 static cc_bool useBitmappedFont, hasBitmappedFont;
 static struct Bitmap dirtBmp, stoneBmp;
 #define TILESIZE 48
+#ifdef CC_BUILD_PS2
+/* Normal and highlighted button images from gui_classic.png or gui.png */
+static struct Bitmap buttonBmps[2];
+static cc_bool buttonsFromClassicGui;
+#endif
 
 static void CloseActiveScreen(void) {
 	OnscreenKeyboard_Close();
@@ -437,8 +442,47 @@ static void ExtractTerrainTiles(struct Bitmap* bmp) {
 static cc_bool Launcher_SelectZipEntry(const cc_string* path) {
 	return
 		String_CaselessEqualsConst(path, "default.png") ||
+#ifdef CC_BUILD_PS2
+		String_CaselessEqualsConst(path, "gui.png")         ||
+		String_CaselessEqualsConst(path, "gui_classic.png") ||
+#endif
 		String_CaselessEqualsConst(path, "terrain.png");
 }
+
+#ifdef CC_BUILD_PS2
+/* Copies out the normal and highlighted button images from gui.png */
+static void ExtractButtonImages(struct Bitmap* bmp) {
+	/* Buttons are 200x20 at y=66 (normal) and y=86 (highlighted) in a 256x256 gui.png */
+	int scale = bmp->width / 256, i;
+	if (scale < 1 || bmp->height < 106 * scale) return;
+
+	for (i = 0; i < 2; i++)
+	{
+		Mem_Free(buttonBmps[i].scan0);
+		Bitmap_Allocate(&buttonBmps[i], 200 * scale, 20 * scale);
+		Bitmap_Scale(&buttonBmps[i], bmp, 0, (66 + i * 20) * scale, 200 * scale, 20 * scale);
+	}
+}
+
+static cc_result ExtractButtonsFrom(const cc_string* path, struct Stream* data) {
+	/* Use same gui image as the in-game menus do */
+	cc_bool useClassic = Options_GetBool(OPT_CLASSIC_GUI, true) || Options_GetBool(OPT_CLASSIC_MODE, false);
+	cc_bool isClassic  = String_CaselessEqualsConst(path, "gui_classic.png");
+	struct Bitmap bmp;
+	cc_result res;
+
+	/* Preferred gui image always replaces the other one */
+	if (buttonBmps[0].scan0 && (buttonsFromClassicGui == useClassic || isClassic != useClassic)) return 0;
+
+	res = Png_Decode(&bmp, data);
+	if (res) { Logger_SysWarn2(res, "decoding", path); return res; }
+
+	ExtractButtonImages(&bmp);
+	buttonsFromClassicGui = isClassic;
+	Mem_Free(bmp.scan0);
+	return 0;
+}
+#endif
 
 static cc_result Launcher_ProcessZipEntry(const cc_string* path, struct Stream* data, struct ZipEntry* source) {
 	struct Bitmap bmp;
@@ -469,6 +513,11 @@ static cc_result Launcher_ProcessZipEntry(const cc_string* path, struct Stream* 
 			Mem_Free(bmp.scan0);
 		}
 	}
+#ifdef CC_BUILD_PS2
+	else {
+		return ExtractButtonsFrom(path, data);
+	}
+#endif
 	return 0;
 }
 
@@ -509,7 +558,11 @@ void Launcher_TryLoadTexturePack(void) {
 	}
 
 	/* user selected texture pack is missing some required .png files */
+#ifdef CC_BUILD_PS2
+	if (!hasBitmappedFont || dirtBmp.scan0 == NULL || buttonBmps[0].scan0 == NULL) {
+#else
 	if (!hasBitmappedFont || dirtBmp.scan0 == NULL) {
+#endif
 		TexturePack_ExtractDefault(ExtractTexturePack, &default_path);
 	}
 
@@ -555,6 +608,41 @@ void Launcher_DrawBackgroundAll(struct Context2D* ctx) {
 		Launcher_DrawBackground(ctx, 0, 0, ctx->width, ctx->height);
 	}
 }
+
+#ifdef CC_BUILD_PS2
+/* Draws the button image stretched to fit, using its left and right ends so the edges stay intact */
+/*  (same approach as the in-game ButtonWidget) */
+cc_bool Launcher_DrawButtonTexture(struct Context2D* ctx, int x, int y, int width, int height, cc_bool active) {
+	struct Bitmap* dst = (struct Bitmap*)ctx;
+	struct Bitmap* src = &buttonBmps[active ? 1 : 0];
+	int x0 = x, y0 = y, w = width, h = height;
+	int xx, yy, srcX, half = width / 2;
+	BitmapCol* srcRow;
+	BitmapCol* dstRow;
+
+	if (!src->scan0 || !Launcher_Theme.ClassicBackground) return false;
+	if (!Drawer2D_Clamp(ctx, &x, &y, &w, &h)) return true;
+
+	for (yy = y; yy < y + h; yy++)
+	{
+		srcRow = Bitmap_GetRow(src, (yy - y0) * src->height / height);
+		dstRow = Bitmap_GetRow(dst, yy);
+
+		for (xx = x; xx < x + w; xx++)
+		{
+			/* source pixels per destination pixel is the same as for the height */
+			if (xx - x0 < half) {
+				srcX = (xx - x0) * src->height / height;
+			} else {
+				srcX = src->width - 1 - (x0 + width - 1 - xx) * src->height / height;
+			}
+			srcX = max(0, min(src->width - 1, srcX));
+			dstRow[xx] = srcRow[srcX] | BITMAPCOLOR_A_MASK;
+		}
+	}
+	return true;
+}
+#endif
 
 cc_bool Launcher_BitmappedText(void) {
 	return (useBitmappedFont || Launcher_Theme.ClassicBackground) && hasBitmappedFont;

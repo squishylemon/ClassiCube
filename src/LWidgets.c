@@ -113,6 +113,9 @@ static void LButton_DrawHighlight(struct Context2D* ctx, int x, int y, int width
 }
 
 void LButton_DrawBackground(struct Context2D* ctx, int x, int y, int width, int height, cc_bool active) {
+#ifdef CC_BUILD_PS2
+	if (Launcher_DrawButtonTexture(ctx, x, y, width, height, active)) return;
+#endif
 	LButton_DrawBase(     ctx, x, y, width, height, active);
 	LButton_DrawBorder(   ctx, x, y, width, height);
 	LButton_DrawHighlight(ctx, x, y, width, height, active);

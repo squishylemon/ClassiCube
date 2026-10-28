@@ -227,7 +227,12 @@ static void Menu_SwitchHacks(void* a, void* b)     { HacksSettingsScreen_Show();
 static void Menu_SwitchEnv(void* a, void* b)       { EnvSettingsScreen_Show(); }
 static void Menu_SwitchNostalgia(void* a, void* b) { NostalgiaMenuScreen_Show(); }
 
+#ifdef CC_BUILD_PS2
+/* Map size is chosen with Small/Normal/Huge buttons, as typing it in with a controller is slow */
+static void Menu_SwitchGenLevel(void* a, void* b)        { ClassicGenScreen_Show(); }
+#else
 static void Menu_SwitchGenLevel(void* a, void* b)        { GenLevelScreen_Show(); }
+#endif
 static void Menu_SwitchClassicGenLevel(void* a, void* b) { ClassicGenScreen_Show(); }
 static void Menu_SwitchLoadLevel(void* a, void* b)       { LoadLevelScreen_Show(); }
 static void Menu_SwitchSaveLevel(void* a, void* b)       { SaveLevelScreen_Show(); }
@@ -1051,172 +1056,6 @@ void EditHotkeyScreen_Show(struct HotkeyData original) {
 /*########################################################################################################################*
 *-----------------------------------------------------GenLevelScreen------------------------------------------------------*
 *#########################################################################################################################*/
-#ifdef CC_BUILD_PS2
-/* Map size is chosen from a list of sizes with left/right, instead of typed in, */
-/*  as typing with a controller is slow. Sizes are also capped to fit in memory */
-#define GENLEVEL_NUM_SIZES 3
-static const short genLevel_horSizes[] = { 16, 32, 64, 128, 256 };
-static const short genLevel_verSizes[] = { 16, 32, 64 };
-
-static struct GenLevelScreen {
-	Screen_Body
-	struct FontDesc font;
-	struct ButtonWidget sizes[GENLEVEL_NUM_SIZES], flatgrass, vanilla, cancel;
-	struct TextWidget title;
-	int sizeIndex[GENLEVEL_NUM_SIZES];
-	struct Widget* __widgets[GENLEVEL_NUM_SIZES + 4];
-} GenLevelScreen;
-
-static const short* GenLevelScreen_GetSizes(int i, int* count) {
-	if (i == 1) {
-		*count = Array_Elems(genLevel_verSizes); return genLevel_verSizes;
-	}
-	*count = Array_Elems(genLevel_horSizes); return genLevel_horSizes;
-}
-
-static int GenLevelScreen_GetSize(struct GenLevelScreen* s, int i) {
-	int count;
-	const short* sizes = GenLevelScreen_GetSizes(i, &count);
-	return sizes[s->sizeIndex[i]];
-}
-
-/* Picks the largest size in the list that isn't bigger than the current map */
-static void GenLevelScreen_InitSize(struct GenLevelScreen* s, int i, int cur) {
-	int j, count;
-	const short* sizes = GenLevelScreen_GetSizes(i, &count);
-
-	s->sizeIndex[i] = 0;
-	for (j = 0; j < count; j++)
-	{
-		if (sizes[j] <= cur) s->sizeIndex[i] = j;
-	}
-}
-
-static void GenLevelScreen_UpdateSize(struct GenLevelScreen* s, int i) {
-	static const char* const names[GENLEVEL_NUM_SIZES] = { "Width", "Height", "Length" };
-	cc_string str; char strBuffer[STRING_SIZE];
-	int size = GenLevelScreen_GetSize(s, i);
-
-	String_InitArray(str, strBuffer);
-	String_Format2(&str, "<  %c: %i  >", names[i], &size);
-	ButtonWidget_Set(&s->sizes[i], &str, &s->font);
-}
-
-static void GenLevelScreen_ChangeSize(struct GenLevelScreen* s, int i, int dir) {
-	int count;
-	GenLevelScreen_GetSizes(i, &count);
-
-	s->sizeIndex[i] = (s->sizeIndex[i] + dir + count) % count;
-	GenLevelScreen_UpdateSize(s, i);
-	s->dirty = true;
-}
-
-static void GenLevelScreen_SizeClick(void* screen, void* widget) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	int i = (int)((struct ButtonWidget*)widget - s->sizes);
-	GenLevelScreen_ChangeSize(s, i, 1);
-}
-
-static void GenLevelScreen_Gen(void* screen, const struct MapGenerator* gen) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	int width  = GenLevelScreen_GetSize(s, 0);
-	int height = GenLevelScreen_GetSize(s, 1);
-	int length = GenLevelScreen_GetSize(s, 2);
-	RNGState rnd;
-
-	Random_SeedFromCurrentTime(&rnd);
-	Gui_Remove((struct Screen*)s);
-	Gen_Start(gen, Random_Next(&rnd, Int32_MaxValue), width, height, length);
-}
-
-static void GenLevelScreen_Flatgrass(void* a, void* b) { GenLevelScreen_Gen(a, &FlatgrassGen); }
-static void GenLevelScreen_Notchy(void* a, void* b)    { GenLevelScreen_Gen(a, &NotchyGen);    }
-
-static int GenLevelScreen_InputDown(void* screen, int key, struct InputDevice* device) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	int horDelta, verDelta, i;
-	Input_CalcDelta(key, device, &horDelta, &verDelta);
-
-	/* Left/right changes the selected size */
-	for (i = 0; horDelta && s->selectedI >= 0 && i < GENLEVEL_NUM_SIZES; i++)
-	{
-		if (s->widgets[s->selectedI] != (struct Widget*)&s->sizes[i]) continue;
-
-		GenLevelScreen_ChangeSize(s, i, horDelta);
-		return true;
-	}
-	return Menu_InputDown(screen, key, device);
-}
-
-static void GenLevelScreen_ContextLost(void* screen) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	Font_Free(&s->font);
-	Screen_ContextLost(screen);
-}
-
-static void GenLevelScreen_ContextRecreated(void* screen) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	int i;
-	Gui_MakeTitleFont(&s->font);
-	Screen_UpdateVb(screen);
-
-	for (i = 0; i < GENLEVEL_NUM_SIZES; i++)
-	{
-		GenLevelScreen_UpdateSize(s, i);
-	}
-	TextWidget_SetConst(&s->title,       "Generate new level", &s->font);
-	ButtonWidget_SetConst(&s->flatgrass, "Flatgrass",          &s->font);
-	ButtonWidget_SetConst(&s->vanilla,   "Vanilla",            &s->font);
-	ButtonWidget_SetConst(&s->cancel,    "Cancel",             &s->font);
-}
-
-static void GenLevelScreen_Layout(void* screen) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	int i;
-	for (i = 0; i < GENLEVEL_NUM_SIZES; i++)
-	{
-		Widget_SetLocation(&s->sizes[i], ANCHOR_CENTRE, ANCHOR_CENTRE, 0, (i - 2) * 50);
-	}
-
-	Widget_SetLocation(&s->title,     ANCHOR_CENTRE, ANCHOR_CENTRE,    0, -150);
-	Widget_SetLocation(&s->flatgrass, ANCHOR_CENTRE, ANCHOR_CENTRE, -120,   60);
-	Widget_SetLocation(&s->vanilla,   ANCHOR_CENTRE, ANCHOR_CENTRE,  120,   60);
-	Menu_LayoutBack(&s->cancel);
-}
-
-static void GenLevelScreen_Init(void* screen) {
-	struct GenLevelScreen* s = (struct GenLevelScreen*)screen;
-	int i;
-	s->widgets    = s->__widgets;
-	s->numWidgets = 0;
-	s->maxWidgets = Array_Elems(s->__widgets);
-	s->selectedI  = -1;
-
-	GenLevelScreen_InitSize(s, 0, World.Width);
-	GenLevelScreen_InitSize(s, 1, World.Height);
-	GenLevelScreen_InitSize(s, 2, World.Length);
-
-	TextWidget_Add(s, &s->title);
-	for (i = 0; i < GENLEVEL_NUM_SIZES; i++)
-	{
-		ButtonWidget_Add(s, &s->sizes[i], 400, GenLevelScreen_SizeClick);
-	}
-	ButtonWidget_Add(s, &s->flatgrass, 200, GenLevelScreen_Flatgrass);
-	ButtonWidget_Add(s, &s->vanilla,   200, GenLevelScreen_Notchy);
-	AddPrimaryButton(s, &s->cancel,         Menu_SwitchPause);
-
-	s->maxVertices = Screen_CalcDefaultMaxVertices(s);
-}
-
-static const struct ScreenVTABLE GenLevelScreen_VTABLE = {
-	GenLevelScreen_Init,      Screen_NullUpdate, Screen_NullFunc,
-	MenuScreen_Render2,       Screen_BuildMesh,
-	GenLevelScreen_InputDown, Screen_InputUp,    Screen_TKeyPress, Screen_TText,
-	Menu_PointerDown,         Screen_PointerUp,  Menu_PointerMove, Screen_TMouseScroll,
-	GenLevelScreen_Layout,    GenLevelScreen_ContextLost, GenLevelScreen_ContextRecreated,
-	Menu_PadAxis
-};
-#else
 #define GENLEVEL_NUM_INPUTS 4
 
 static struct GenLevelScreen {
@@ -1412,8 +1251,6 @@ static const struct ScreenVTABLE GenLevelScreen_VTABLE = {
 	GenLevelScreen_Layout,      GenLevelScreen_ContextLost, GenLevelScreen_ContextRecreated,
 	Menu_PadAxis
 };
-#endif
-
 void GenLevelScreen_Show(void) {
 	struct GenLevelScreen* s = &GenLevelScreen;
 	s->grabsInput = true;
