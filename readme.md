@@ -1,3 +1,86 @@
+# ClassiCube – console ports fork
+
+This is a fork of [ClassiCube](https://github.com/ClassiCube/ClassiCube), a custom Minecraft Classic compatible client written in C.
+
+This fork aims to clean up and fix ClassiCube's ports to older consoles, for both singleplayer and its multiplayer client. It starts with the **PlayStation 2**.
+
+> [!NOTE]
+> This is an unofficial fork, so please report problems with the console ports here rather than to the main ClassiCube project.
+> Everything below the [original ClassiCube README](#original-classicube-readme) heading is the upstream README, and still applies to this fork.
+
+## PlayStation 2 port status
+
+The PS2 port is now in a **playable state**. It has been tested in [PCSX2](https://github.com/PCSX2/pcsx2) but **not yet on real hardware**.
+
+#### What works
+
+* **Multiplayer**
+  * Sign in with a [ClassiCube account](https://www.classicube.net/) and join servers from the server list.
+  * Connections no longer time out after a few seconds.
+  * Chat works with a controller through an on-screen keyboard, or with a USB keyboard.
+* **Texture packs**
+  * Server texture packs download over HTTPS, including ones hosted on Dropbox.
+  * Server player skins download too.
+* **Larger worlds**
+  * Worlds are stored in a compact format that keeps only the parts that aren't a single block type in full.
+  * A 256×256×256 world needs about 2 MB instead of 16 MB.
+  * A 32 MB freebuild map loads in about 12 MB, so maps larger than the PS2's 32 MB of RAM can be played.
+* **Split screen**
+  * 2, 3 or 4 players, each on their own controller.
+  * 2 players are stacked top and bottom, 3 players get three columns, and 4 players get quarters.
+  * Each player has their own HUD, while menus and chat are shown once across the screen.
+* **Rendering**
+  * Sky, clouds and water now draw correctly.
+  * Fog, back-face culling, scrolling clouds, block selection outlines and screenshots all work.
+  * Textures stay in video memory instead of being re-uploaded every time they're used.
+* **Sound effects**
+* **Low memory handling**
+  * When memory runs low, the game reduces view distance instead of crashing.
+  * Maps that are too large show a clear message.
+
+#### Known limitations
+
+* Music is disabled, as it needs about 17 MB of storage, too much for a memory card.
+* Maps that are mostly filled with builds can still be too large for 32 MB of RAM.
+* Performance in PCSX2 is roughly 10–20 fps on busy multiplayer maps, and around 20 fps in 4-player split screen.
+* In-game menus close with Select rather than Circle.
+
+#### Controls
+
+| Button | Action |
+|---|---|
+| Left stick / D-pad | Move, navigate menus |
+| Right stick | Look around |
+| Cross | Jump, confirm |
+| Triangle | Open chat |
+| Square | Inventory |
+| L1 / R1 | Place / delete block |
+| L2 / R2 | Previous / next hotbar slot |
+| Start | Pause menu |
+| Select | Back / close menu |
+| Circle + R1 / L1 | Toggle flying / speed |
+| Circle + D-pad up / down | Fly up / down |
+
+On the on-screen keyboard, Cross presses the highlighted key, Circle closes it, Square is backspace, and L1 / R1 type a space or `/`.
+
+On Japanese consoles, Cross and Circle are swapped.
+
+#### Building
+
+Run `make ps2` with [ps2sdk](https://github.com/ps2dev/ps2sdk) installed. Alternatively, build with the ps2dev Docker image:
+
+```
+docker run --rm -v "$PWD:/src" -w /src ps2dev/ps2dev:latest sh -c "apk add --no-cache make && make ps2"
+```
+
+This produces `ClassiCube-ps2.elf`, which can be run in PCSX2 or loaded on a PS2 with e.g. [wLaunchELF](https://github.com/ps2homebrew/wLaunchELF).
+
+The game stores its data next to the ELF when run from a USB drive or PCSX2's host folder. Otherwise it stores it on the memory card.
+
+---
+
+# Original ClassiCube README
+
 ClassiCube is a custom Minecraft Classic compatible client written in C from scratch.<br>
 
 You can **download ClassiCube** [here](https://www.classicube.net/download/) and the very latest builds [here](https://www.classicube.net/nightlies/).
@@ -92,7 +175,7 @@ And also runs on:
 * PS Vita - unfinished, rendering issues (can [download from here](https://www.classicube.net/download/vita))
 * PSP - unfinished, rendering issues (can [download from here](https://www.classicube.net/download/psp))
 * PS3 - unfinished, rendering issues (can [download from here](https://www.classicube.net/download/ps3))
-* PS2 - unfinished, major rendering and **stability issues** (can [download from here](https://www.classicube.net/download/ps2))
+* PS2 - playable in this fork, see [PlayStation 2 port status](#playstation-2-port-status) (upstream build can be [downloaded from here](https://www.classicube.net/download/ps2))
 * PS1 - unfinished, major rendering and **stability issues** (can [download from here](https://www.classicube.net/download/ps1))
 * Xbox 360 - completely unfinished, **broken on real hardware** (can [download from here](https://www.classicube.net/download/360))
 * Xbox - unfinished, rendering issues (can [download from here](https://www.classicube.net/download/xbox))
