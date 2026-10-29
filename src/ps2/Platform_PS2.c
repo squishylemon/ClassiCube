@@ -175,10 +175,28 @@ static cc_result MapFioError(int res) {
 }
 
 void Platform_EncodePath(cc_filepath* dst, const cc_string* path) {
+	static const cc_string cdrom = String_FromConst("cdrom0:");
 	char* str = dst->buffer;
-	Mem_Copy(str, root_path.buffer, root_path.length);
-	str += root_path.length;
+
+	// Paths that already start with a device (e.g. "cdrom0:") aren't relative to the root directory
+	if (String_IndexOf(path, ':') == -1) {
+		Mem_Copy(str, root_path.buffer, root_path.length);
+		str += root_path.length;
+	}
 	String_EncodeUtf8(str, path);
+
+	// Files on the disc are named with ISO 9660 version numbers (e.g. MUSIC1.WAV;1)
+	if (String_CaselessStarts(path, &cdrom)) {
+		str += String_Length(str);
+		str[0] = ';'; str[1] = '1'; str[2] = '\0';
+	}
+}
+
+static cc_bool BootedFrom(const char* device);
+
+const char* Platform_BundledMusicDir(void) {
+	// Music is stored on the disc, so isn't available when e.g. booted from USB
+	return BootedFrom("cdrom") ? "cdrom0:\\MUSIC\\" : NULL;
 }
 
 void Platform_DecodePath(cc_string* dst, const cc_filepath* path) {

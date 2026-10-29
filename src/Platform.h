@@ -281,6 +281,10 @@ CC_API cc_result Directory_Enum(const cc_string* path, void* obj, Directory_Enum
 /* Returns non-zero if the given file exists. */
 int File_Exists(const cc_filepath* path);
 void Directory_GetCachePath(cc_string* path);
+#ifdef CC_BUILD_BUNDLED_MUSIC
+/* Returns the directory containing music bundled with the game (e.g. on the disc), or NULL if none */
+const char* Platform_BundledMusicDir(void);
+#endif
 #ifdef CC_BUILD_COMPACTMUSIC
 /* Returns how many kilobytes are free on the device that game data is stored on */
 /* Returns -1 if this is unknown, or is effectively unlimited (e.g. a USB drive) */

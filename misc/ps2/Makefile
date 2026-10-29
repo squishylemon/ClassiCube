@@ -101,13 +101,16 @@ $(TARGET)-min.elf: $(TARGET).elf
 #---------------------------------------------------------------------------------
 ISO_DIR := $(BUILD_DIR)/iso
 
-# Disc only needs the executable, as textures and sounds are built into it
+# Textures and sounds are built into the executable, while music is streamed from the disc
 # (needs xorriso, e.g. 'apk add xorriso' in the ps2dev Docker image)
-$(TARGET).iso: $(TARGET)-min.elf misc/ps2/SYSTEM.CNF
+MUSIC_FILES := $(wildcard misc/music/*.wav)
+
+$(TARGET).iso: $(TARGET)-min.elf misc/ps2/SYSTEM.CNF $(MUSIC_FILES)
 	rm -rf $(ISO_DIR)
-	mkdir -p $(ISO_DIR)
+	mkdir -p $(ISO_DIR)/MUSIC
 	cp misc/ps2/SYSTEM.CNF $(ISO_DIR)/SYSTEM.CNF
 	cp $(TARGET)-min.elf $(ISO_DIR)/CLASSICU.ELF
+	for f in $(MUSIC_FILES); do cp $$f $(ISO_DIR)/MUSIC/$$(basename $$f | tr a-z A-Z); done
 	xorriso -as mkisofs -quiet -iso-level 1 -sysid PLAYSTATION -V CLASSICUBE -o $@ $(ISO_DIR)
 
 iso: $(TARGET).iso

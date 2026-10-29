@@ -545,6 +545,7 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_COMPACTMUSIC /* Music is converted to ADPCM, small enough to fit on memory cards */
 	#define CC_BUILD_BUNDLED_TEXTURES /* ClassiCube textures are built in, as network may not be available */
 	#define CC_BUILD_BUNDLED_SOUNDS   /* Likewise for ClassiCube sounds */
+	#define CC_BUILD_BUNDLED_MUSIC    /* Free music on the disc, so there's music without network */
 	#define CC_BUILD_CHECKNETWORK     /* Many consoles have no network adapter or cable */
 	#define CC_BUILD_COMPACTMAP /* Uniform 16x16x16 chunks stored as a single block */
 	#define CC_BUILD_GROWFACES /* Avoids cracks between faces, as GS only has 1/16 pixel precision */

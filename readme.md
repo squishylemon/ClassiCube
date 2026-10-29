@@ -36,6 +36,8 @@ The PS2 port is now in a **playable state**. It has been tested in [PCSX2](https
   * Textures stay in video memory instead of being re-uploaded every time they're used.
 * **Sound effects**
 * **Music**
+  * The disc image includes 7 free (CC0) tracks from OpenGameArt, streamed from the disc, so there's music even without network access.
+  * Mojang's music can still be downloaded, and plays alongside the bundled tracks.
   * Downloaded music is converted on the console to compact ADPCM audio, which is also much cheaper to play than the original Ogg Vorbis.
   * Quality is chosen to fit the free space on the memory card, from 22 kHz down to 8 kHz. USB drives and PCSX2's host folder always get 22 kHz.
   * Converting takes a while the first time music is downloaded.

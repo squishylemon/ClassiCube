@@ -611,6 +611,28 @@ static cc_result Music_PlayFile(const cc_string* path, struct Stream* stream) {
 	return Music_PlayOgg(stream);
 }
 
+#ifdef CC_BUILD_BUNDLED_MUSIC
+/* Adds music bundled with the game (e.g. on the disc), named MUSIC1.WAV, MUSIC2.WAV etc */
+/*  These play as well as any downloaded music, so there's always some music without network */
+static void Music_AddBundled(struct StringsBuffer* files) {
+	cc_string path; char pathBuffer[FILENAME_SIZE];
+	const char* dir = Platform_BundledMusicDir();
+	cc_filepath raw_path;
+	int i;
+	if (!dir) return;
+
+	for (i = 1; i <= 99; i++)
+	{
+		String_InitArray(path, pathBuffer);
+		String_Format2(&path, "%cMUSIC%i.WAV", dir, &i);
+
+		Platform_EncodePath(&raw_path, &path);
+		if (!File_Exists(&raw_path)) break;
+		StringsBuffer_Add(files, &path);
+	}
+}
+#endif
+
 static void Music_RunLoop(void) {
 	struct StringsBuffer files;
 	cc_string path;
@@ -623,6 +645,9 @@ static void Music_RunLoop(void) {
 	StringsBuffer_SetLengthBits(&files, STRINGSBUFFER_DEF_LEN_SHIFT);
 	StringsBuffer_Init(&files);
 	Directory_Enum(&audio_dir, &files, Music_AddFile);
+#ifdef CC_BUILD_BUNDLED_MUSIC
+	Music_AddBundled(&files);
+#endif
 
 	Random_SeedFromCurrentTime(&rnd);
 	res = Audio_Init(&music_ctx, AUDIO_MAX_BUFFERS);
