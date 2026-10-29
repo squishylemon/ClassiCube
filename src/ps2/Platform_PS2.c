@@ -189,12 +189,24 @@ void Platform_DecodePath(cc_string* dst, const cc_filepath* path) {
 void Directory_GetCachePath(cc_string* path) { }
 
 cc_result Directory_Create2(const cc_filepath* path) {
-	return MapFioError(fioMkdir(path->buffer));
+	int res = fioMkdir(path->buffer), fd;
+	if (res >= 0) return 0;
+
+	// MCMAN reports creating an existing directory as 'no such entry' (-4), so check
+	//  whether the directory actually exists to tell that apart from real failures
+	fd = fioDopen(path->buffer);
+	if (fd >= 0) { fioDclose(fd); return ReturnCode_DirectoryExists; }
+	return MapFioError(res);
 }
 
 int File_Exists(const cc_filepath* path) {
-	io_stat_t sb;
-	return fioGetstat(path->buffer, &sb) >= 0 && (sb.mode & FIO_SO_IFREG);
+	// NOTE: Can't use fioGetstat, as with memory cards it succeeds even when the file doesn't
+	//  exist (and leaves the result from the previous call in the stat buffer)
+	int fd = fioOpen(path->buffer, FIO_O_RDONLY);
+	if (fd < 0) return false;
+
+	fioClose(fd);
+	return true;
 }
 
 int Directory_GetFreeSpaceKB(void) {
@@ -607,9 +619,10 @@ cc_bool Socket_NetworkAvailable(void) {
 	if (!net_supported) return false; // no network adapter
 	if (net_ready)      return true;
 
-	// Only wait briefly for the link to come up (i.e. cable plugged in), as also
-	//  waiting for a DHCP lease would delay startup by 5+ seconds
-	return WaitUntilReady(Net_CheckIFLinkStatus, 6) == 0;
+	// Only wait for the link to come up (i.e. cable plugged in), as also waiting
+	//  for a DHCP lease would delay startup by 5+ more seconds
+	// NOTE: Link takes ~3 seconds to come up, so use same timeout as Networking_EnsureReady
+	return WaitUntilReady(Net_CheckIFLinkStatus, 10) == 0;
 }
 
 // Returns whether a network adapter is available
