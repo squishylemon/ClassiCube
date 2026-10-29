@@ -23,9 +23,10 @@ jobs:
           echo "IOS_SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)" >> "$GITHUB_ENV"
           cat "$GITHUB_ENV"
 
+      # Xcode 16 and later can't link 32 bit (armv7) apps anymore
       - name: Compile iOS build
         run: |
-          make ios
+          make ios IOS_32BIT=0
 
 #      - name: Compile iOS simulator build
 #        run: |
