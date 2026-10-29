@@ -2,6 +2,7 @@ name: Release all
 # Builds every platform, then attaches all of their binaries to a GitHub release
 # The release is created if it doesn't exist yet, otherwise its files are added/replaced
 # NOTE: Platforms that fail to build are left out, rather than stopping the release
+# NOTE: macOS 32 bit isn't included, as its build container is private to the upstream ClassiCube repo
 on:
   workflow_dispatch:
     inputs:
@@ -58,11 +59,6 @@ jobs:
   build_linux:
     name: Linux
     uses: ./.github/workflows/build_linux.yml
-    secrets: inherit
-
-  build_mac32:
-    name: macOS 32 bit
-    uses: ./.github/workflows/build_mac32.yml
     secrets: inherit
 
   build_mac64:
@@ -191,7 +187,6 @@ jobs:
       - build_haiku
       - build_ios
       - build_linux
-      - build_mac32
       - build_mac64
       - build_macclassic
       - build_msdos

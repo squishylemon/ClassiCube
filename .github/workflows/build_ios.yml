@@ -11,18 +11,22 @@ concurrency:
 jobs:
   build:
     timeout-minutes: 10
-    runs-on: macOS-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+      # Use whichever Xcode and iOS SDK the runner image defaults to, as older macOS images
+      #  (and the Xcode versions only they have) get retired over time
       - name: Setup environment
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.0.1.app/Contents/Developer
-          echo "XCODE_APP=Xcode_15.0.1.app" >> "$GITHUB_ENV"
-          echo "IOS_SDK_VERSION=17.0" >> "$GITHUB_ENV"
+          XCODE_DIR=$(xcode-select -p)
+          echo "XCODE_APP=$(basename "$(dirname "$(dirname "$XCODE_DIR")")")" >> "$GITHUB_ENV"
+          echo "IOS_SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)" >> "$GITHUB_ENV"
+          cat "$GITHUB_ENV"
 
+      # Xcode 16 and later can't link 32 bit (armv7) apps anymore
       - name: Compile iOS build
         run: |
-          make ios
+          make ios IOS_32BIT=0
 
 #      - name: Compile iOS simulator build
 #        run: |

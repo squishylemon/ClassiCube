@@ -15,6 +15,8 @@ XCODE_APP		?= Xcode.app
 IOS_SDK_VERSION	?= 12.1
 # override to change minimum iOS runtime/deployment version
 IOS_MIN_VERSION ?= 6.0
+# set to 0 to only build for 64 bit devices (Xcode 16 and later can't link 32 bit apps)
+IOS_32BIT		?= 1
 
 # CPU architecture names
 ifdef IOS_SIM
@@ -101,7 +103,13 @@ $(BUILD_DIR_64)/$(TARGET): $(OBJS_64)
 	$(LD) $^ -arch $(ARCH_64) $(LDFLAGS) $(LIBS) -o $@
 
 
-$(BUILD_DIR_APP)/$(TARGET): $(BUILD_DIR_32)/$(TARGET) $(BUILD_DIR_64)/$(TARGET)
+ifeq ($(IOS_32BIT),1)
+APP_BINARIES := $(BUILD_DIR_32)/$(TARGET) $(BUILD_DIR_64)/$(TARGET)
+else
+APP_BINARIES := $(BUILD_DIR_64)/$(TARGET)
+endif
+
+$(BUILD_DIR_APP)/$(TARGET): $(APP_BINARIES)
 	$(LIPO) -create $^ -output $@
 
 $(BUILD_DIR_APP)/Assets.car:
