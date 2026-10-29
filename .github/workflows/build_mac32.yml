@@ -1,5 +1,6 @@
 name: Build latest (macOS 32 bit)
-# run manually, or from the release all workflow
+# run manually (not part of release all, as the build container below is private to
+#  the upstream ClassiCube repo, so this only works there)
 on:
   workflow_call:
   workflow_dispatch:
