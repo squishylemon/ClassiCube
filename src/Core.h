@@ -547,6 +547,7 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_BUNDLED_SOUNDS   /* Likewise for ClassiCube sounds */
 	#define CC_BUILD_CHECKNETWORK     /* Many consoles have no network adapter or cable */
 	#define CC_BUILD_COMPACTMAP /* Uniform 16x16x16 chunks stored as a single block */
+	#define CC_BUILD_GROWFACES /* Avoids cracks between faces, as GS only has 1/16 pixel precision */
 	#define CC_BUILD_FASTLEAVES /* Faces between leaves aren't drawn, as that's a lot of geometry */
 	#define DEFAULT_NET_BACKEND CC_NET_BACKEND_BUILTIN
 	#define DEFAULT_SSL_BACKEND CC_SSL_BACKEND_BEARSSL
