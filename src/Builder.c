@@ -30,7 +30,10 @@ static cc_bool Builder_FullBright;
 static int Builder_ChunkEndX, Builder_ChunkEndZ;
 static int Builder_Offsets[FACE_COUNT] = { -1,1, -EXTCHUNK_SIZE,EXTCHUNK_SIZE, -EXTCHUNK_SIZE_2,EXTCHUNK_SIZE_2 };
 
-#ifdef CC_BUILD_GROWFACES
+#if defined CC_BUILD_GROWFACES && defined CC_BUILD_N64
+/* N64 vertex positions only have 1/32 block precision, so anything smaller is rounded away */
+#define FACE_GROW_AMOUNT (1.0f / 32)
+#elif defined CC_BUILD_GROWFACES
 /* 1/64 of a block covers rounding cracks even far away, while only being 1/4 of a texel */
 #define FACE_GROW_AMOUNT (1.0f / 64)
 #endif

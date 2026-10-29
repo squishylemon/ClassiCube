@@ -44,6 +44,7 @@ typedef struct {
     int16_t vp_offset[4];
     uint16_t tex_size[8];
     uint16_t tex_offset[8];
+    uint16_t fog_params[4]; // scale integer, scale fraction, max alpha, enabled
     uint16_t tri_cmd;
     uint16_t tri_cull;
 } __attribute__((aligned(8), packed)) gpu_state;
@@ -103,6 +104,16 @@ static void gpuSetTexSize(uint16_t width, uint16_t height)
 static void gpuSetTexOffset(uint16_t width, uint16_t height)
 {
     gpu_set_tex_word(offsetof(gpu_state, tex_offset[0]), (width << 16) | height);
+}
+
+// When enabled, vertex alpha is replaced with 255 - W * scale (clamped to 0-255)
+static void gpuSetFog(bool enabled, float scale)
+{
+    int32_t fixed = (int32_t)(scale * (1 << 16));
+    uint64_t packed = ((uint64_t)(uint16_t)(fixed >> 16) << 48) | ((uint64_t)(uint16_t)fixed << 32)
+                    | (255 << 16) | (enabled ? 1 : 0);
+
+    gpu_set_long(offsetof(gpu_state, fog_params), packed);
 }
 
 

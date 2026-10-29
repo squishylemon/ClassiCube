@@ -142,7 +142,7 @@ static void SPConnection_BeginConnect(void) {
 	verSize = 64;
 #endif
 
-#if defined CC_BUILD_N64 || defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_TINYMEM
+#if defined CC_BUILD_NDS || defined CC_BUILD_PS1 || defined CC_BUILD_SATURN || defined CC_BUILD_TINYMEM
 	gen = &FlatgrassGen;
 #else
 	gen = &NotchyGen;

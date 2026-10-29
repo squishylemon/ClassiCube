@@ -534,7 +534,7 @@ static void RefreshBorderChunks(int maxHeight) {
 /*########################################################################################################################*
 *--------------------------------------------------Chunks updating/sorting------------------------------------------------*
 *#########################################################################################################################*/
-#ifdef CC_BUILD_PS2
+#if defined CC_BUILD_PS2 || defined CC_BUILD_N64
 /* Building a chunk takes several milliseconds, so only build more chunks per frame */
 /*  when there's time to spare, and allow building fewer when frame rate is low */
 #define CHUNK_TARGET_TIME 0.030f
@@ -553,7 +553,7 @@ static int renderDistSquared;
 /* Chunks past this distance are automatically unloaded */
 static int buildDistSquared;
 
-#ifdef CC_BUILD_PS2
+#if defined CC_BUILD_PS2 || defined CC_BUILD_N64
 /* Fog is almost opaque at view distance, so don't waste time drawing chunks */
 /*  that would be (nearly) entirely fogged anyway */
 #define CHUNK_DIST_MARGIN 8

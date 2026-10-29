@@ -34,7 +34,7 @@ cc_bool Launcher_ShowEmptyServers;
 static cc_bool useBitmappedFont, hasBitmappedFont;
 static struct Bitmap dirtBmp, stoneBmp;
 #define TILESIZE 48
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 /* Normal and highlighted button images from gui_classic.png or gui.png */
 static struct Bitmap buttonBmps[2];
 static cc_bool buttonsFromClassicGui;
@@ -371,7 +371,7 @@ void LauncherTheme_Load(struct LauncherTheme* theme) {
 		return;
 	}
 	*theme = Launcher_ModernTheme;
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 	/* Draw background using the texture pack's images (downloaded or built-in) by default */
 	theme->ClassicBackground = Options_GetBool("nostalgia-classicbg", true);
 #else
@@ -447,14 +447,14 @@ static void ExtractTerrainTiles(struct Bitmap* bmp) {
 static cc_bool Launcher_SelectZipEntry(const cc_string* path) {
 	return
 		String_CaselessEqualsConst(path, "default.png") ||
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 		String_CaselessEqualsConst(path, "gui.png")         ||
 		String_CaselessEqualsConst(path, "gui_classic.png") ||
 #endif
 		String_CaselessEqualsConst(path, "terrain.png");
 }
 
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 /* Copies out the normal and highlighted button images from gui.png */
 static void ExtractButtonImages(struct Bitmap* bmp) {
 	/* Buttons are 200x20 at y=66 (normal) and y=86 (highlighted) in a 256x256 gui.png */
@@ -518,7 +518,7 @@ static cc_result Launcher_ProcessZipEntry(const cc_string* path, struct Stream* 
 			Mem_Free(bmp.scan0);
 		}
 	}
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 	else {
 		return ExtractButtonsFrom(path, data);
 	}
@@ -563,7 +563,7 @@ void Launcher_TryLoadTexturePack(void) {
 	}
 
 	/* user selected texture pack is missing some required .png files */
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 	if (!hasBitmappedFont || dirtBmp.scan0 == NULL || buttonBmps[0].scan0 == NULL) {
 #else
 	if (!hasBitmappedFont || dirtBmp.scan0 == NULL) {
@@ -614,7 +614,7 @@ void Launcher_DrawBackgroundAll(struct Context2D* ctx) {
 	}
 }
 
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 /* Draws the button image stretched to fit, using its left and right ends so the edges stay intact */
 /*  (same approach as the in-game ButtonWidget) */
 cc_bool Launcher_DrawButtonTexture(struct Context2D* ctx, int x, int y, int width, int height, cc_bool active) {

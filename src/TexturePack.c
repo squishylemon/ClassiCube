@@ -148,11 +148,12 @@ static void Atlas_Convert2DTo1D(void) {
 static void Atlas_Update1D(void) {
 	int maxAtlasHeight, maxTilesPerAtlas, maxTiles;
 	int maxTexHeight = Gfx.MaxTexHeight;
+	int maxTexSize   = Gfx.MaxAtlasSize ? Gfx.MaxAtlasSize : Gfx.MaxTexSize;
 
 	/* E.g. a graphics backend may support textures up to 256 x 256 */
 	/*   dimension wise, but only have enough storage for 16 x 256 */
-	if (Gfx.MaxTexSize) {
-		int maxCurHeight = Gfx.MaxTexSize / Atlas2D.TileSize;
+	if (maxTexSize) {
+		int maxCurHeight = maxTexSize / Atlas2D.TileSize;
 		maxTexHeight     = min(maxTexHeight, maxCurHeight);
 	}
 
@@ -497,6 +498,9 @@ void TexturePack_SetDefault(const cc_string* texPack) {
 	Options_Set(OPT_DEFAULT_TEX_PACK, texPack);
 }
 
+/* Whether the default texture packs are currently being tried in turn */
+static cc_bool extractingDefault;
+
 cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** default_path) {
 	cc_result res = ReturnCode_FileNotFound;
 	const char* defaults[3];
@@ -507,17 +511,20 @@ cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** d
 	defaults[1] = "texpacks/default.zip";
 	defaults[2] = "texpacks/classicube.zip";
 
-	for (i = 0; i < Array_Elems(defaults); i++) 
+	extractingDefault = true;
+	for (i = 0; i < Array_Elems(defaults); i++)
 	{
 		path = String_FromReadonly(defaults[i]);
 		res  = callback(&path);
 		if (res) continue;
 
-		*default_path = defaults[i];
+		*default_path     = defaults[i];
+		extractingDefault = false;
 		return 0;
 	}
 
-	*default_path = NULL;
+	*default_path     = NULL;
+	extractingDefault = false;
 	return res;
 }
 
@@ -633,6 +640,8 @@ static cc_result ExtractFromFile(const cc_string* path) {
 #ifdef CC_BUILD_BUNDLED_TEXTURES
 	if (ReturnCode_IsNotFound(res) && TexturePack_OpenBundled(&stream, path)) res = 0;
 #endif
+	/* Missing default texture packs are expected, as they are tried in turn */
+	if (res && extractingDefault && ReturnCode_IsNotFound(res)) return res;
 	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
 
 	res = ExtractFrom(&stream, path);

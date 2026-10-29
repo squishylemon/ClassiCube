@@ -2,6 +2,7 @@ BUILD_DIR		= build-n64
 SOURCE_DIR	 	= src/n64
 N64_ROM_TITLE 	= "ClassiCube"
 N64_ROM_RTC 	= true
+N64_ROM_SAVETYPE = flashram
 TARGET			= ClassiCube-n64
 N64_MKDFS_ROOT	= $(BUILD_DIR)/romfs
 SRC_DIRS		= 

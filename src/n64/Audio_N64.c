@@ -29,7 +29,7 @@ static struct AudioContext* active_ctxs[MAX_CONTEXTS];
 static int num_active;
 static kmutex_t mix_lock;
 static kthread_t* mix_thread;
-static volatile cc_bool mix_stop;
+static volatile cc_bool mix_stop, mix_finished;
 static cc_int32* mix_buf;
 
 static void Mixer_Lock(void)   { kmutex_lock(&mix_lock);   }
@@ -128,6 +128,7 @@ static int MixerThread(void* arg) {
 		MixChunk(out, frames);
 		audio_write_end();
 	}
+	mix_finished = true;
 	return 0;
 }
 
@@ -147,16 +148,22 @@ cc_bool AudioBackend_Init(void) {
 	if (!mix_buf) { audio_close(); return false; }
 
 	kmutex_init(&mix_lock, KMUTEX_STANDARD);
-	mix_stop   = false;
-	mix_thread = kthread_new("Mixer", 8 * 1024, MIXER_THREAD_PRIORITY, MixerThread, NULL);
+	mix_stop     = false;
+	mix_finished = false;
+	mix_thread   = kthread_new("Mixer", 8 * 1024, MIXER_THREAD_PRIORITY, MixerThread, NULL);
 	return mix_thread != NULL;
 }
 
 void AudioBackend_Tick(void) { }
 
 void AudioBackend_Free(void) {
+	kirq_wait_t wait = kirq_begin_wait_vi();
 	if (!mix_thread) return;
 	mix_stop = true;
+
+	// libdragon fails an assertion when joining a thread that hasn't finished yet (see Thread_Join),
+	//  so wait for it to finish first (mixer thread wakes up on the next AI interrupt)
+	while (!mix_finished) kirq_wait(&wait);
 	kthread_join(mix_thread);
 	mix_thread = NULL;
 

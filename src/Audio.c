@@ -258,6 +258,8 @@ static cc_result Sounds_ExtractZip(const cc_string* path) {
 	if (ReturnCode_IsNotFound(res) && String_Equals(path, &Sounds_ZipPathCC)) {
 		res = Sounds_OpenBundled(&stream);
 	}
+	/* Original sounds not being downloaded is normal, as ClassiCube sounds are used instead */
+	if (ReturnCode_IsNotFound(res) && String_Equals(path, &Sounds_ZipPathMC)) return res;
 #endif
 	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
 
