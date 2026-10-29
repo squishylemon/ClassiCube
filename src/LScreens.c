@@ -845,9 +845,17 @@ static void MainScreen_ApplyUpdateLabel(struct MainScreen* s) {
 	}
 }
 
+#ifdef CC_BUILD_PS2
+/* No Exit button, as there's nothing sensible to exit back to */
+#define MainScreen_HasExit() false
+#define MainScreen_ExitApp NULL
+#else
+#define MainScreen_HasExit() (Platform_Flags & PLAT_FLAG_APP_EXIT)
+
 static void MainScreen_ExitApp(void* w) {
 	Window_Main.Exists = false;
 }
+#endif
 
 static void MainScreen_Activated(struct LScreen* s_) {
 	struct MainScreen* s = (struct MainScreen*)s_;
@@ -872,7 +880,7 @@ static void MainScreen_Activated(struct LScreen* s_) {
 	LButton_Add(s, &s->btnSPlayer, 200, 35, "Singleplayer",
 				MainScreen_Singleplayer, main_btnSPlayer);
 #ifdef CC_BUILD_SPLITSCREEN
-	LButton_Add(s, &s->btnSplit,   200, 35, "Splitscreen (WIP)", 
+	LButton_Add(s, &s->btnSplit,   200, 35, "Splitscreen", 
 				SwitchToSplitScreen,     main_btnSplit);
 #endif
 
@@ -884,7 +892,7 @@ static void MainScreen_Activated(struct LScreen* s_) {
 	LButton_Add(s, &s->btnOptions, 100, 35, "Options", 
 				SwitchToSettings, main_btnOptions);
 
-	if (Platform_Flags & PLAT_FLAG_APP_EXIT) {
+	if (MainScreen_HasExit()) {
 		LLabel_Add(s,  &s->lblUpdate,  "&eChecking..", main_lblUpdate_N);
 		LButton_Add(s, &s->btnUpdates,  100, 35, "Exit", 
 					MainScreen_ExitApp, main_btnUpdates);
@@ -1154,13 +1162,18 @@ static void FetchResourcesScreen_Error(struct HttpRequest* req) {
 	LLabel_SetText(&FetchResourcesScreen.lblStatus, &str);
 }
 
+static void FetchResourcesScreen_Cancel(void* w) {
+	Fetcher_Cancel();
+	CheckResourcesScreen_Next(w);
+}
+
 static void FetchResourcesScreen_Activated(struct LScreen* s_) {
 	struct FetchResourcesScreen* s = (struct FetchResourcesScreen*)s_;
 	s->lblStatus.small = true;
 
 	LLabel_Add(s,  &s->lblStatus,   "",    fres_lblStatus);
-	LButton_Add(s, &s->btnCancel,   120, 35, "Cancel",                   
-				CheckResourcesScreen_Next, fres_btnCancel);
+	LButton_Add(s, &s->btnCancel,   120, 35, "Cancel",
+				FetchResourcesScreen_Cancel, fres_btnCancel);
 	LSlider_Add(s, &s->sdrProgress, 200, 12, BitmapColor_RGB(0, 220, 0), fres_sdrProgress);
 
 	Fetcher_ErrorCallback = FetchResourcesScreen_Error;
@@ -1183,9 +1196,30 @@ static void FetchResourcesScreen_UpdateStatus(struct FetchResourcesScreen* s, in
 	LLabel_SetText(&s->lblStatus, &str);
 }
 
+#ifdef CC_BUILD_COMPACTMUSIC
+static cc_bool FetchResourcesScreen_UpdateConverting(struct FetchResourcesScreen* s) {
+	cc_string str; char strBuffer[STRING_SIZE];
+	const char* name;
+	int progress;
+
+	name = Fetcher_GetConverting(&progress);
+	if (!name) return false;
+
+	String_InitArray(str, strBuffer);
+	String_Format1(&str, "&eConverting %c..", name);
+
+	if (!String_Equals(&str, &s->lblStatus.text)) LLabel_SetText(&s->lblStatus, &str);
+	LSlider_SetProgress(&s->sdrProgress, progress);
+	return true;
+}
+#endif
+
 static void FetchResourcesScreen_UpdateProgress(struct FetchResourcesScreen* s) {
 	int reqID, progress;
 
+#ifdef CC_BUILD_COMPACTMUSIC
+	if (FetchResourcesScreen_UpdateConverting(s)) return;
+#endif
 	if (!Http_GetCurrent(&reqID, &progress)) return;
 	FetchResourcesScreen_UpdateStatus(s, reqID);
 	/* making request still, haven't started download yet */

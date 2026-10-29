@@ -1,0 +1,83 @@
+name: Release (PS2)
+# Builds the PS2 version and publishes it as a GitHub release, with the .elf and .iso as downloads
+# Builds from branches other than master are published as pre-releases
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'third_party/**'
+      - 'misc/ps2/**'
+      - 'misc/cc_textures.zip'
+      - 'misc/cc_audio.zip'
+      - 'misc/makefiles/**'
+      - 'Makefile'
+      - '.github/workflows/release_ps2.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-ps2-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    container:
+      image: ps2dev/ps2dev:latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install prerequisites
+        run: apk add --no-cache make xorriso
+
+      - name: Compile PS2 build and disc image
+        run: |
+          LATEST_FLAG=-DCC_COMMIT_SHA=\\\"$GITHUB_SHA\\\"
+          make ps2 iso EXTRA_CFLAGS="$LATEST_FLAG"
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          cp ClassiCube-ps2-min.elf release/ClassiCube-ps2.elf
+          cp ClassiCube-ps2.iso     release/ClassiCube-ps2.iso
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClassiCube-ps2
+          path: release/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ClassiCube-ps2
+          path: release
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          TAG="ps2-${BRANCH//\//-}-${GITHUB_RUN_NUMBER}"
+
+          PRERELEASE=""
+          if [ "$BRANCH" != "master" ]; then PRERELEASE="--prerelease"; fi
+
+          NOTES=$(printf '%s\n' \
+            "PS2 build of \`$BRANCH\` at $GITHUB_SHA." \
+            "" \
+            "- **ClassiCube-ps2.elf**: run in PCSX2, or on a PS2 with e.g. wLaunchELF" \
+            "- **ClassiCube-ps2.iso**: disc image for PCSX2 or Open PS2 Loader")
+
+          gh release create "$TAG" release/* \
+            --repo   "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title  "PS2 build #$GITHUB_RUN_NUMBER ($BRANCH, $SHORT_SHA)" \
+            --notes  "$NOTES" \
+            $PRERELEASE

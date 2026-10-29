@@ -108,6 +108,7 @@ struct InputDevice {
 	int enterButton1, enterButton2;
 	int pauseButton1, pauseButton2;
 	int escapeButton;
+	int backButton; /* Also closes menus (e.g. B/Circle on a gamepad) */
 	int pageUpButton, pageDownButton;
 	/* Buttons in launcher mode */
 	int tabLauncher;
@@ -128,6 +129,7 @@ extern struct InputDevice TouchDevice;
 
 #define InputDevice_IsEnter(key,  dev) ((key) == (dev)->enterButton1 || (key) == (dev)->enterButton2)
 #define InputDevice_IsPause(key,  dev) ((key) == (dev)->pauseButton1 || (key) == (dev)->pauseButton2)
+#define InputDevice_IsBack(key,   dev) ((key) == (dev)->escapeButton || ((dev)->backButton && (key) == (dev)->backButton))
 
 #define Input_IsWinPressed()   (Input.Pressed[CCKEY_LWIN]   || Input.Pressed[CCKEY_RWIN])
 #define Input_IsAltPressed()   (Input.Pressed[CCKEY_LALT]   || Input.Pressed[CCKEY_RALT])

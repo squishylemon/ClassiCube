@@ -10,10 +10,17 @@
 #include "../ExtMath.h"
 #include "../Logger.h"
 #include "../Options.h"
+// Default on-screen keyboard is mostly transparent, which makes it hard to read
+//  on a TV (especially with chat behind it), so use solid keys and an obvious selection
+// (key labels are drawn in black)
+#define KB_NORMAL_COLOR     BitmapCol_Make(0xB8, 0xB8, 0xB8, 0xF0)
+#define KB_SELECTED_COLOR   BitmapCol_Make(0xF0, 0xC0, 0x30, 0xFF)
+#define KB_BACKGROUND_COLOR BitmapCol_Make(0x30, 0x30, 0x30, 0xFF)
 #include "../VirtualKeyboard.h"
 #include "../VirtualDialog.h"
 
 #include <libpad.h>
+#include <osd_config.h>
 #include <gs_psm.h>
 #include <dma.h>
 #include <graph.h>
@@ -23,6 +30,8 @@
 #include <libmouse.h>
 
 static cc_bool mouseSupported, kbdSupported;
+// Whether the most recently pressed button was on a controller (rather than a USB keyboard)
+static cc_bool lastInputWasPad = true;
 #include "../VirtualCursor.h"
 struct _DisplayData DisplayInfo;
 struct cc_window WindowInfo;
@@ -51,6 +60,8 @@ static void InitDisplay(void) {
 void Window_PreInit(void) {
 	dma_channel_initialize(DMA_CHANNEL_GIF, NULL, 0);
 	dma_channel_fast_waits(DMA_CHANNEL_GIF);
+	// VIF1 is only used for reading back VRAM (screenshots)
+	dma_channel_initialize(DMA_CHANNEL_VIF1, NULL, 0);
 	display_mode = graph_get_region();
 
 	DisplayInfo.Width  = 640;
@@ -153,13 +164,39 @@ static const cc_uint8 key_map[] = {
 /* E0 */	CCKEY_LCTRL, CCKEY_LSHIFT, CCKEY_LALT, 0, CCKEY_RCTRL, CCKEY_RSHIFT, CCKEY_RALT, 0,
 };
 
+// Raw mode only reports key up/down, so characters have to be calculated manually
+//  (assumes US keyboard layout)
+static int KeyToChar(int key, cc_bool shift) {
+	static const char normal[]  = "1234567890" "\0\0\0\0" " -=[]\\#;'`,./";
+	static const char shifted[] = "!@#$%^&*()" "\0\0\0\0" " _+{}|~:\"~<>?";
+
+	if (key >= 0x04 && key <= 0x1D) return (shift ? 'A' : 'a') + (key - 0x04);
+	if (key >= 0x1E && key <= 0x38) return (shift ? shifted : normal)[key - 0x1E];
+	return 0;
+}
+
 static void ProcessKeyboardInput(void) {
 	if (!kbdSupported) return;
+	PS2KbdRawKey raw;
 
-	PS2KbdRawKey key;
-	if (PS2KbdReadRaw(&key) <= 0) return;
+	while (PS2KbdReadRaw(&raw) > 0)
+	{
+		int key = raw.key < Array_Elems(key_map) ? key_map[raw.key] : 0;
+		cc_bool pressed = raw.state == PS2KBD_RAWKEY_DOWN;
+		Input.Sources  |= INPUT_SOURCE_NORMAL;
 
-	Platform_Log1("%i", &key.key);
+		if (pressed) {
+			lastInputWasPad = false;
+			// Physical keyboard is being used to type, so on-screen keyboard is no longer needed
+			if (DisplayInfo.ShowingSoftKeyboard) VirtualKeyboard_Close();
+		}
+
+		if (key) Input_Set(key, pressed);
+		if (!pressed || Input_IsCtrlPressed()) continue;
+
+		int c = KeyToChar(raw.key, Input_IsShiftPressed());
+		if (c) Event_RaiseInt(&InputEvents.Press, c);
+	}
 }
 
 
@@ -184,6 +221,11 @@ static void ProcessMouseInput(float delta) {
 void Window_ProcessEvents(float delta) {
 	ProcessMouseInput(delta);
 	ProcessKeyboardInput();
+
+	// Let worker threads (e.g. http) run, since EE threads are never preempted by same priority threads
+	ee_thread_status_t info;
+	ReferThreadStatus(GetThreadId(), &info);
+	RotateThreadReadyQueue(info.current_priority);
 }
 
 void Window_EnableRawMouse(void)  { Input.RawMode = true; }
@@ -224,9 +266,14 @@ void Gamepads_PreInit(void) {
 	padPortOpen(1, 0, padBuf1);
 }
 
+// Japanese consoles use circle to confirm, other regions use cross
+static cc_bool circle_main;
+
 void Gamepads_Init(void) {
-	Input_DisplayNames[CCPAD_1] = "CIRCLE";
-	Input_DisplayNames[CCPAD_2] = "CROSS";
+	circle_main = configGetLanguage() == LANGUAGE_JAPANESE;
+
+	Input_DisplayNames[CCPAD_1] = circle_main ? "CIRCLE" : "CROSS";
+	Input_DisplayNames[CCPAD_2] = circle_main ? "CROSS"  : "CIRCLE";
 	Input_DisplayNames[CCPAD_3] = "SQUARE";
 	Input_DisplayNames[CCPAD_4] = "TRIANGLE";
 }
@@ -236,16 +283,17 @@ static void HandleButtons(int port, int buttons) {
 	// So just flip the bits to make more sense
 	buttons = buttons ^ 0xFFFF;
 	//Platform_Log1("BUTTONS: %h", &buttons);
-	
-	Gamepad_SetButton(port, CCPAD_1, buttons & PAD_CIRCLE);
-	Gamepad_SetButton(port, CCPAD_2, buttons & PAD_CROSS);
+	if (buttons) lastInputWasPad = true;
+
+	Gamepad_SetButton(port, CCPAD_1, buttons & (circle_main ? PAD_CIRCLE : PAD_CROSS));
+	Gamepad_SetButton(port, CCPAD_2, buttons & (circle_main ? PAD_CROSS  : PAD_CIRCLE));
 	Gamepad_SetButton(port, CCPAD_3, buttons & PAD_SQUARE);
 	Gamepad_SetButton(port, CCPAD_4, buttons & PAD_TRIANGLE);
       
 	Gamepad_SetButton(port, CCPAD_START,  buttons & PAD_START);
 	Gamepad_SetButton(port, CCPAD_SELECT, buttons & PAD_SELECT);
 	Gamepad_SetButton(port, CCPAD_LSTICK, buttons & PAD_L3);
-	Gamepad_SetButton(port, CCPAD_RSTICK, buttons & PAD_L3);
+	Gamepad_SetButton(port, CCPAD_RSTICK, buttons & PAD_R3);
 
 	Gamepad_SetButton(port, CCPAD_LEFT,   buttons & PAD_LEFT);
 	Gamepad_SetButton(port, CCPAD_RIGHT,  buttons & PAD_RIGHT);
@@ -301,7 +349,8 @@ void Gamepads_Process(float delta) {
 *------------------------------------------------------Framebuffer--------------------------------------------------------*
 *#########################################################################################################################*/
 void Window_AllocFramebuffer(struct Bitmap* bmp, int width, int height) {
-	bmp->scan0  = (BitmapCol*)Mem_Alloc(width * height, BITMAPCOLOR_SIZE, "window pixels");
+	// NOTE: Can fail when out of memory (e.g. when showing an out of memory dialog)
+	bmp->scan0  = (BitmapCol*)Mem_TryAlloc(width * height, BITMAPCOLOR_SIZE);
 	bmp->width  = width;
 	bmp->height = height;
 }
@@ -323,8 +372,11 @@ void Window_FreeFramebuffer(struct Bitmap* bmp) {
 *------------------------------------------------------Soft keyboard------------------------------------------------------*
 *#########################################################################################################################*/
 void OnscreenKeyboard_Open(struct OpenKeyboardArgs* args) {
-	if (Input.Sources & INPUT_SOURCE_NORMAL) return;
+	// Only show on-screen keyboard when e.g. chat was opened using a controller
+	if (!lastInputWasPad) return;
 	VirtualKeyboard_Open(args);
+	// Start with a key selected, so it's obvious where the D-pad cursor is
+	kb_curX = 0;
 }
 
 void OnscreenKeyboard_SetText(const cc_string* text) {

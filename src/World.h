@@ -23,6 +23,8 @@ extern struct IGameComponent World_Component;
 
 CC_VAR extern struct _WorldData {
 	/* The blocks in the world. */
+	/* NOTE: With CC_BUILD_COMPACTMAP, this is only used temporarily while importing a map, */
+	/*  (blocks are instead stored per chunk in ChunkBlocks/ChunkFills) */
 	BlockRaw* Blocks;
 #ifdef EXTENDED_BLOCKS
 	/* The upper 8 bit of blocks in the world. */
@@ -60,6 +62,12 @@ CC_VAR extern struct _WorldData {
 	int ChunksCount;
 	/* Seed world was generated with. May be 0 (unknown) */
 	int Seed;
+#ifdef CC_BUILD_COMPACTMAP
+	/* Blocks of each 16x16x16 chunk, or NULL if every block in the chunk is ChunkFills[i] */
+	BlockRaw** ChunkBlocks;
+	/* The block that fills each chunk, when ChunkBlocks[i] is NULL */
+	BlockRaw* ChunkFills;
+#endif
 } World;
 
 /* Frees the blocks array, sets dimensions to 0, resets environment to default. */
@@ -75,6 +83,15 @@ CC_API void World_SetNewMap(BlockRaw* blocks, int width, int height, int length)
 CC_NOINLINE void World_SetDimensions(int width, int height, int length);
 void World_OutOfMemory(void);
 
+/* Allocates a blocks array for a map of the given volume, reusing the previous map's array if possible */
+/* NOTE: Contents of the returned array are undefined */
+BlockRaw* World_TryAllocBlocks(cc_uint32 volume);
+/* Frees a blocks array that came from World_TryAllocBlocks */
+/* NOTE: On low memory builds, the array is instead kept around for reuse by World_TryAllocBlocks */
+void World_FreeBlocks(BlockRaw* blocks, cc_uint32 volume);
+/* Frees the blocks array that was being kept around for reuse (if any) */
+void World_FreeSpareBlocks(void);
+
 #ifdef EXTENDED_BLOCKS
 /* Sets World.Blocks2 and updates internal state for more than 256 blocks. */
 void World_SetMapUpper(BlockRaw* blocks);
@@ -87,9 +104,41 @@ static CC_INLINE BlockID World_GetBlock(int x, int y, int z) {
 	int i = World_Pack(x, y, z);
 	return (BlockID)World_GetRawBlock(i);
 }
+#elif defined CC_BUILD_COMPACTMAP
+/* Index of the given coordinates within a 16x16x16 chunk's blocks */
+#define World_ChunkLocal(x, y, z) ((((y) & 15) << 8) | (((z) & 15) << 4) | ((x) & 15))
+
+/* Gets the block at the given coordinates. */
+/* NOTE: Does NOT check that the coordinates are inside the map. */
+static CC_INLINE BlockID World_GetBlock(int x, int y, int z) {
+	int i = World_ChunkPack(x >> 4, y >> 4, z >> 4);
+	BlockRaw* blocks = World.ChunkBlocks[i];
+	return blocks ? blocks[World_ChunkLocal(x, y, z)] : World.ChunkFills[i];
+}
+/* Gets the block at the given packed index (slow!) */
+BlockID World_GetBlockAt(int index);
+#define World_GetRawBlock(idx) World_GetBlockAt(idx)
+
+/* Prepares to receive the blocks of a map whose dimensions are not known yet */
+cc_bool World_BeginStagedMap(cc_uint32 volume);
+/* Returns where to write the blocks starting at the given index, and how many can be written there */
+BlockRaw* World_GetStagingBuffer(cc_uint32 index, cc_uint32* count);
+/* Stores the blocks written to the staging buffer, up to the given index */
+cc_bool World_StagedBlocksWritten(cc_uint32 index);
+/* Frees the blocks of a map that was being received */
+void World_FreeStagedMap(void);
+/* Like World_SetNewMap, but uses the received blocks */
+void World_SetNewStagedMap(int width, int height, int length);
 #else
 #define World_GetBlock(x, y, z) World.Blocks[World_Pack(x, y, z)]
 #define World_GetRawBlock(idx)  World.Blocks[idx]
+#endif
+
+#ifdef CC_BUILD_COMPACTMAP
+/* Whether the world has any blocks */
+#define World_HasBlocks() (World.ChunkFills != NULL)
+#else
+#define World_HasBlocks() (World.Blocks != NULL)
 #endif
 
 /* If Y is above the map, returns BLOCK_AIR. */

@@ -14,6 +14,9 @@
 	#define POS_2 $vf12 // vertex 2 position
 	#define POS_3 $vf13 // vertex 3 position
 	#define POS_4 $vf14 // vertex 4 position
+	#define FOGS  $vf15 // fog values of vertices (1 in x, 2 in y, 3 in z, 4 in w)
+	#define CRS1  $vf16 // temp for face culling
+	#define CRS2  $vf17 // temp for face culling
 
 	#define _one   $vf0w
 	#define POS1w $vf11w
@@ -78,7 +81,22 @@
 	vmulw.xyz	\vpos, \vpos, \vpos # TMP.xyz = IN.xyz * IN.w (inverse W)
 	vmul.xyz	\vpos, \vpos, VP_S  # TMP.xyz = TMP * viewport_scale
 	vadd.xyz	\vpos, \vpos, VP_O  # TMP.xyz = TMP + viewport_origin
-	vftoi0.xyz	\vpos, \vpos	    # TMP.xyz = int(TMP)
+.endm
+
+// Calculates fog value for a vertex from its clip space W
+//	(must be done before W is replaced by 1/W)
+.macro CalcFog lane, vpos
+	vmulw.\lane	FOGS, FOG_S, \vpos # FOGS.lane = fog_scale * VEC.w
+.endm
+
+// Combines Z (24 bits) and F (8 bits) of a vertex for XYZF2 register
+//	$t0, $t8 = temp registers
+.macro PackZF z_offset, f_offset
+	lw			$t0, \z_offset(TMP)
+	lw			$t8, \f_offset(TMP)
+	sll			$t8, $t8, 24
+	or			$t0, $t0, $t8
+	sw			$t0, \z_offset(TMP)
 .endm
 
 // Fully transforms 4 vertices with size of 16 bytes
@@ -92,6 +110,7 @@ BEG_FUNC(DrawTexturedQuad)
 	lqc2		POS_1, 0x00(SRC)
 
 	TransformVertex POS_1
+	CalcFog x, POS_1
 	lwc1		COL1, 0x0C(SRC)
 	lwc1		U_1,  0x10(SRC)
 	lwc1		V_1,  0x14(SRC)
@@ -107,6 +126,7 @@ BEG_FUNC(DrawTexturedQuad)
 	lqc2		POS_2, 0x00(TMP) # V2 = tmp
 
 	TransformVertex POS_2
+	CalcFog y, POS_2
 	lwc1		COL2,  0x24(SRC)
 	lwc1		U_2,   0x28(SRC)
 	lwc1		V_2,   0x2C(SRC)
@@ -119,6 +139,7 @@ BEG_FUNC(DrawTexturedQuad)
 	lqc2		POS_3, 0x30(SRC)
 
 	TransformVertex POS_3
+	CalcFog z, POS_3
 	lwc1		COL3,  0x3C(SRC)
 	lwc1		U_3,   0x40(SRC)
 	lwc1		V_3,   0x44(SRC)
@@ -136,6 +157,7 @@ BEG_FUNC(DrawTexturedQuad)
 	lqc2		POS_4, 0x00(TMP) # V4 = tmp
 
 	TransformVertex POS_4
+	CalcFog w, POS_4
 	lwc1		COL4,  0x54(SRC)
 	lwc1		U_4,   0x58(SRC)
 	lwc1		V_4,   0x5C(SRC)
@@ -163,11 +185,47 @@ BEG_FUNC(DrawTexturedQuad)
 	VPTransform POS_3
 	VPTransform POS_4
 
+	# calculate screen space winding (for face culling)
+	# CRS1.z = (P2 - P1).x * (P3 - P1).y - (P2 - P1).y * (P3 - P1).x
+	vsub.xy		CRS1, POS_2, POS_1
+	vsub.xy		CRS2, POS_3, POS_1
+	vopmula.xyz	$ACC, CRS1, CRS2
+	vopmsub.xyz	CRS1, CRS2, CRS1
+
+	# finish fog calculation: F = clamp(fog_scale * W + fog_bias, 0, 255)
+	vadd.xyzw	FOGS, FOGS, FOG_B
+	vmaxx.xyzw	FOGS, FOGS, V0001 # V0001.x is 0
+	vminix.xyzw	FOGS, FOGS, FOG_M
+	vftoi0.xyzw	FOGS, FOGS
+
+	vftoi0.xyz	POS_1, POS_1
+	vftoi0.xyz	POS_2, POS_2
+	vftoi0.xyz	POS_3, POS_3
+	vftoi0.xyz	POS_4, POS_4
+
 	# Convert to register format
 	sqc2		POS_1, 0x00(TMP)
 	sqc2		POS_2, 0x10(TMP)
 	sqc2		POS_3, 0x20(TMP)
 	sqc2		POS_4, 0x30(TMP)
+	sqc2		FOGS,  0x40(TMP)
+	sqc2		CRS1,  0x50(TMP)
+
+	# check if quad should be culled
+	# (cull mask 0 = no culling, otherwise sign of mask = winding to cull)
+	lui			$t8, %hi(gfx_cullMask)
+	lw			$t8, %lo(gfx_cullMask)($t8)
+	lw			$t0, 0x58(TMP)
+	beqz		$t8, not_culled
+	xor			$t0, $t0, $t8
+	bgez		$t0, quad_culled
+	nop
+not_culled:
+
+	PackZF 0x08, 0x40
+	PackZF 0x18, 0x44
+	PackZF 0x28, 0x48
+	PackZF 0x38, 0x4C
 
 	lhu			XY_1, 0x00(TMP)
 	lhu			 Y_1, 0x04(TMP)
@@ -252,8 +310,25 @@ BEG_FUNC(DrawTexturedQuad)
 
 	addi DST, 6 * S_PTEX
 
-	# TODO clipping
-any_clipped_vertices:
+quad_culled:
 	jr $ra
 	move $v0, DST
+
+any_clipped_vertices:
+	# CLIP_FLAGS holds 6 flags for each of the 4 vertices. If all 4 vertices are
+	#  outside the same plane, then the quad can't be visible, so just discard it
+	#  (e.g. quads behind the camera, which would otherwise be clipped in C)
+	srl			$t1, $t0, 6
+	and			$t1, $t1, $t0
+	srl			$t2, $t0, 12
+	and			$t1, $t1, $t2
+	srl			$t2, $t0, 18
+	and			$t1, $t1, $t2
+	andi		$t1, $t1, 0x3F
+	bnez		$t1, quad_culled
+	nop
+
+	# NULL is returned so that the caller clips the quad instead
+	jr $ra
+	move $v0, $zero
 END_FUNC(DrawTexturedQuad)

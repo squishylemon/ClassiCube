@@ -42,11 +42,12 @@
 #include <io_common.h>
 #include <iox_stat.h>
 #include <libcdvd.h>
+#include <libmc.h>
 
 const cc_result ReturnCode_FileShareViolation = 1000000000; // not used
-const cc_result ReturnCode_FileNotFound       = -4;
+const cc_result ReturnCode_FileNotFound       = -ENOENT;
 const cc_result ReturnCode_PathNotFound       = 99999;
-const cc_result ReturnCode_DirectoryExists    = -8;
+const cc_result ReturnCode_DirectoryExists    = -EEXIST;
 
 const cc_result ReturnCode_SocketInProgess  = EINPROGRESS;
 const cc_result ReturnCode_SocketWouldBlock = EWOULDBLOCK;
@@ -72,8 +73,10 @@ cc_bool Platform_ReadonlyFilesystem;
 *#########################################################################################################################*/
 #include "../main_impl.h"
 static void SetupIOPCore(void);
+static void GetBootDevice(int argc, char** argv);
 
 int main(int argc, char** argv) {
+	GetBootDevice(argc, argv);
 	SetupIOPCore();
 
 	SetupProgram(argc, argv);
@@ -157,13 +160,43 @@ cc_uint64 Stopwatch_ElapsedMicroseconds(cc_uint64 beg, cc_uint64 end) {
 /*########################################################################################################################*
 *-----------------------------------------------------Directory/File------------------------------------------------------*
 *#########################################################################################################################*/
-static const cc_string root_path = String_FromConst("mass:/ClassiCube/");
+static char root_buffer[32];
+static cc_string root_path = { root_buffer, 0, sizeof(root_buffer) };
+static char boot_device[16];
+
+// Different IOP filesystem drivers report the same error using different codes
+//  (e.g. MCMAN uses -4 for 'no such entry', while FATFS/HostFS use -ENOENT)
+static cc_result MapFioError(int res) {
+	if (res >= 0) return 0;
+
+	if (res == -ENOENT || res == -4) return ReturnCode_FileNotFound;
+	if (res == -EEXIST || res == -8) return ReturnCode_DirectoryExists;
+	return res;
+}
 
 void Platform_EncodePath(cc_filepath* dst, const cc_string* path) {
+	static const cc_string cdrom = String_FromConst("cdrom0:");
 	char* str = dst->buffer;
-	Mem_Copy(str, root_path.buffer, root_path.length);
-	str += root_path.length;
+
+	// Paths that already start with a device (e.g. "cdrom0:") aren't relative to the root directory
+	if (String_IndexOf(path, ':') == -1) {
+		Mem_Copy(str, root_path.buffer, root_path.length);
+		str += root_path.length;
+	}
 	String_EncodeUtf8(str, path);
+
+	// Files on the disc are named with ISO 9660 version numbers (e.g. MUSIC1.WAV;1)
+	if (String_CaselessStarts(path, &cdrom)) {
+		str += String_Length(str);
+		str[0] = ';'; str[1] = '1'; str[2] = '\0';
+	}
+}
+
+static cc_bool BootedFrom(const char* device);
+
+const char* Platform_BundledMusicDir(void) {
+	// Music is stored on the disc, so isn't available when e.g. booted from USB
+	return BootedFrom("cdrom") ? "cdrom0:\\MUSIC\\" : NULL;
 }
 
 void Platform_DecodePath(cc_string* dst, const cc_filepath* path) {
@@ -174,45 +207,116 @@ void Platform_DecodePath(cc_string* dst, const cc_filepath* path) {
 void Directory_GetCachePath(cc_string* path) { }
 
 cc_result Directory_Create2(const cc_filepath* path) {
-	return fioMkdir(path->buffer);
+	int res = fioMkdir(path->buffer), fd;
+	if (res >= 0) return 0;
+
+	// MCMAN reports creating an existing directory as 'no such entry' (-4), so check
+	//  whether the directory actually exists to tell that apart from real failures
+	fd = fioDopen(path->buffer);
+	if (fd >= 0) { fioDclose(fd); return ReturnCode_DirectoryExists; }
+	return MapFioError(res);
 }
 
 int File_Exists(const cc_filepath* path) {
-	io_stat_t sb;
-	return fioGetstat(path->buffer, &sb) >= 0 && (sb.mode & FIO_SO_IFREG);
+	// NOTE: Can't use fioGetstat, as with memory cards it succeeds even when the file doesn't
+	//  exist (and leaves the result from the previous call in the stat buffer)
+	int fd = fioOpen(path->buffer, FIO_O_RDONLY);
+	if (fd < 0) return false;
+
+	fioClose(fd);
+	return true;
 }
 
-// For some reason fioDread seems to be returning a iox_dirent_t, instead of a io_dirent_t
-// The offset of 'name' in iox_dirent_t is different to 'iox_dirent_t', so naively trying
-// to use entry.name doesn't work
-// TODO: Properly investigate why this is happening
-static char* GetEntryName(char* src) {
-	for (int i = 0; i < 256; i++)
+int Directory_GetFreeSpaceKB(void) {
+	static const cc_string mc0 = String_FromConst("mc0:");
+	static const cc_string mc1 = String_FromConst("mc1:");
+	int port, type = 0, free = 0, format = 0, ret = -1;
+
+	// USB drives and PCSX2's host folder have plenty of room
+	if (String_CaselessStarts(&root_path, &mc0)) {
+		port = 0;
+	} else if (String_CaselessStarts(&root_path, &mc1)) {
+		port = 1;
+	} else {
+		return -1;
+	}
+
+	// Memory cards use 1 KB clusters
+	mcGetInfo(port, 0, &type, &free, &format);
+	mcSync(0, NULL, &ret);
+	return (ret == 0 || ret == -1) ? free : 0;
+}
+
+// Different IOP filesystem drivers return directory entries in different layouts:
+//  - io_dirent_t, with the name at offset 40
+//  - iox_dirent_t (e.g. iomanX based drivers), with the name at offset 64
+//  - PCSX2's host: filesystem, which returns the name at offset 32 (and no usable mode)
+#define DIRENT_NAME_IO   40
+#define DIRENT_NAME_IOX  64
+#define DIRENT_NAME_HOST 32
+union DirEntry { io_dirent_t io; cc_uint8 raw[512]; };
+
+static cc_bool IsEntryName(const cc_uint8* src) {
+	int i;
+	if (!src[0] || src[-1]) return false; // must be a NUL terminated string on its own
+
+	for (i = 0; i < 256 && src[i]; i++)
 	{
-		if (src[i]) return &src[i];
+		if (src[i] < ' ') return false;
+	}
+	return i < 256;
+}
+
+static char* GetEntryName(union DirEntry* entry, int* offset) {
+	static const int offsets[] = { DIRENT_NAME_IO, DIRENT_NAME_IOX, DIRENT_NAME_HOST };
+	int i;
+
+	for (i = 0; i < Array_Elems(offsets); i++)
+	{
+		*offset = offsets[i];
+		if (IsEntryName(entry->raw + *offset)) return (char*)entry->raw + *offset;
+	}
+
+	// Unknown layout, so fallback to first non-empty character after io_dirent_t name offset
+	for (i = DIRENT_NAME_IO; i < DIRENT_NAME_IO + 256; i++)
+	{
+		*offset = i;
+		if (entry->raw[i]) return (char*)entry->raw + i;
 	}
 	return NULL;
+}
+
+static int IsEntryDirectory(union DirEntry* entry, int offset, const cc_string* path) {
+	cc_filepath str;
+	io_stat_t sb;
+	if (offset != DIRENT_NAME_HOST) return FIO_SO_ISDIR(entry->io.stat.mode);
+
+	// Mode isn't returned in this layout, so have to query it separately
+	Platform_EncodePath(&str, path);
+	return fioGetstat(str.buffer, &sb) >= 0 && FIO_SO_ISDIR(sb.mode);
 }
 
 cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCallback callback) {
 	cc_string path; char pathBuffer[FILENAME_SIZE];
 	cc_filepath str;
-	io_dirent_t entry;
-	int fd, res;
+	union DirEntry entry;
+	int fd, res, offset;
 
 	Platform_EncodePath(&str, dirPath);
 	fd = fioDopen(str.buffer);
-	if (fd < 0) return fd;
+	if (fd < 0) return MapFioError(fd);
 	
 	res = 0;
 	String_InitArray(path, pathBuffer);
-	Mem_Set(&entry, 0, sizeof(entry));
 
-	while ((res = fioDread(fd, &entry)) > 0) {
+	for (;;) {
+		Mem_Set(&entry, 0, sizeof(entry));
+		if ((res = fioDread(fd, &entry.io)) <= 0) break;
+
 		path.length = 0;
 		String_Format1(&path, "%s/", dirPath);
 
-		char* src = GetEntryName(entry.name);
+		char* src = GetEntryName(&entry, &offset);
 		if (!src) continue;
 
 		// ignore . and .. entry
@@ -222,22 +326,29 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 		int len = String_Length(src);
 		String_AppendUtf8(&path, src, len);
 
-		int is_dir = FIO_SO_ISDIR(entry.stat.mode);
+		int is_dir = IsEntryDirectory(&entry, offset, &path);
 		callback(&path, obj, is_dir);
 	}
 
 	fioDclose(fd);
-	return res;
+	return MapFioError(res);
 }
 
 static cc_result File_Do(cc_file* file, const char* path, int mode) {
 	int res = fioOpen(path, mode);
 	*file   = res;
-	return res < 0 ? res : 0;
+	return MapFioError(res);
 }
 
 cc_result File_Open(cc_file* file, const cc_filepath* path) {
-	return File_Do(file, path->buffer, FIO_O_RDONLY);
+	cc_result res = File_Do(file, path->buffer, FIO_O_RDONLY);
+	io_stat_t sb;
+
+	// Some drivers (e.g. PCSX2's HostFS) return generic errors such as -EIO
+	//  for missing files, so double check whether the file actually exists
+	if (res && res != ReturnCode_FileNotFound && fioGetstat(path->buffer, &sb) < 0)
+		return ReturnCode_FileNotFound;
+	return res;
 }
 cc_result File_Create(cc_file* file, const cc_filepath* path) {
 	return File_Do(file, path->buffer, FIO_O_RDWR | FIO_O_CREAT | FIO_O_TRUNC);
@@ -308,13 +419,19 @@ static int ExecThread(void* param) {
 	return 0; // TODO detach ?
 }
 
+// The network stack (ps2ip/netman) threads run at priorities 86-89. Since the EE kernel never
+//  timeslices, the main thread must run at a lower priority (higher value) than them,
+//  otherwise they never get to run while the main thread is busy rendering
+#define MAIN_THREAD_PRIO 100
+
 void Thread_Run(void** handle, Thread_StartFunc func, int stackSize, const char* name) {
 	ee_thread_t thread = { 0 };
 	thread.func        = ExecThread;
 	thread.stack       = Mem_Alloc(stackSize, 1, "Thread stack");
 	thread.stack_size  = stackSize;
 	thread.gp_reg      = &_gp;
-	thread.initial_priority = 18;
+	// Main thread yields to same priority threads every frame (see Window_ProcessEvents)
+	thread.initial_priority = MAIN_THREAD_PRIO;
 	
 	int thdID = CreateThread(&thread);
 	if (thdID < 0) Process_Abort2(thdID, "Creating thread");
@@ -409,8 +526,15 @@ void Waitable_Wait(void* handle) {
 }
 
 void Waitable_WaitFor(void* handle, cc_uint32 milliseconds) {
-	Process_Abort("Can't wait for");
-	// TODO implement support
+	int semID = (int)handle;
+	cc_uint32 waited;
+
+	// Poll in small steps, as there's no simple wait with timeout
+	for (waited = 0; waited < milliseconds; waited += 10)
+	{
+		if (PollSema(semID) >= 0) return;
+		Thread_Sleep(10);
+	}
 }
 
 
@@ -419,6 +543,7 @@ void Waitable_WaitFor(void* handle, cc_uint32 milliseconds) {
 *#########################################################################################################################*/
 int	ps2ip_getconfig(char* netif_name,t_ip_info* ip_info);
 int ps2ip_setconfig(const t_ip_info* ip_info);
+static cc_bool net_supported;
 
 // https://github.com/ps2dev/ps2sdk/blob/master/NETMAN.txt
 // https://github.com/ps2dev/ps2sdk/blob/master/ee/network/tcpip/samples/tcpip_dhcp/ps2ip.c
@@ -428,16 +553,16 @@ static void Net_StatusCheckCb(s32 alarm_id, u16 time, void *common) {
 }
 
 typedef int (*WaitCheckFunc)(void);
-static int WaitUntilReady(WaitCheckFunc checkingFunction) {
+static int WaitUntilReady(WaitCheckFunc checkingFunction, int maxRetries) {
 	int threadID = GetThreadId();
-	
+
 	for (int retries = 0; checkingFunction() == 0; retries++)
-	{	
+	{
+		if (retries >= maxRetries) return -1;
+
 		// Sleep for 500ms
 		SetAlarm(500 * 16, &Net_StatusCheckCb, &threadID);
 		SleepThread();
-
-		if (retries >= 15) return -1; // 7.5s = 15 * 500ms 
 	}
 	return 0;
 }
@@ -449,9 +574,9 @@ static int Net_CheckIFLinkStatus(void) {
 
 static int Net_CheckDHCPStatus(void) {
 	t_ip_info ip_info;
-	int result;
-	if ((result = ps2ip_getconfig("sm0", &ip_info)) < 0) return result;
-	
+	// NOTE: ps2ip_getconfig returns 0 on failure
+	if (ps2ip_getconfig("sm0", &ip_info) <= 0) return -1;
+
 	if (ip_info.dhcp_enabled) {
 		return ip_info.dhcp_status == DHCP_STATE_BOUND || ip_info.dhcp_status == DHCP_STATE_OFF;
 	}
@@ -460,12 +585,11 @@ static int Net_CheckDHCPStatus(void) {
 
 static int Net_EnableDHCP(void) {
 	t_ip_info ip_info;
-	int result;
 	// SMAP is registered as the "sm0" device to the TCP/IP stack.
-	if ((result = ps2ip_getconfig("sm0", &ip_info)) < 0) return result;
+	if (ps2ip_getconfig("sm0", &ip_info) <= 0) return -1;
 
 	if (!ip_info.dhcp_enabled) {
-		ip_info.dhcp_enabled = 1;	
+		ip_info.dhcp_enabled = 1;
 		return ps2ip_setconfig(&ip_info);
 	}
 	return 1;
@@ -476,30 +600,60 @@ static void Networking_Setup(void) {
 
 	struct ip4_addr IP  = { 0 }, NM = { 0 }, GW = { 0 };
 	ps2ipInit(&IP, &NM, &GW);
+	net_supported = true;
 
+	// DHCP lease is acquired in the background (see Networking_EnsureReady)
 	int res = Net_EnableDHCP();
 	if (res < 0) Platform_Log1("Error %i enabling DHCP", &res);
+}
+
+// Acquiring a DHCP lease can take 5+ seconds (due to lwIP probing for
+//  IP address conflicts), so rather than delaying startup by that long,
+//  only wait for the network to be ready when it is first actually used
+static cc_bool net_ready;
+
+static cc_result Networking_EnsureReady(void) {
+	if (!net_supported) return ERR_NO_NETWORKING;
+	if (net_ready)      return 0;
 
 	Platform_LogConst("Waiting for net link connection...");
-	if(WaitUntilReady(Net_CheckIFLinkStatus) != 0) {
-		Window_ShowDialog("Warning", "Failed to establish network link");
-		return;
+	if (WaitUntilReady(Net_CheckIFLinkStatus, 10) != 0) {
+		Platform_LogConst("Failed to establish network link");
+		return ERR_NO_NETWORKING;
 	}
 
 	Platform_LogConst("Waiting for DHCP lease...");
-	if (WaitUntilReady(Net_CheckDHCPStatus) != 0) {
+	if (WaitUntilReady(Net_CheckDHCPStatus, 30) != 0) {
 		Platform_LogConst("Failed to acquire DHCP lease");
-		return;
+		return ERR_NO_NETWORKING;
 	}
+
 	Platform_LogConst("Network setup done");
+	net_ready = true;
+	return 0;
 }
 
-static void Networking_LoadIOPModules(void) {
+cc_bool Socket_NetworkAvailable(void) {
+	if (!net_supported) return false; // no network adapter
+	if (net_ready)      return true;
+
+	// Only wait for the link to come up (i.e. cable plugged in), as also waiting
+	//  for a DHCP lease would delay startup by 5+ more seconds
+	// NOTE: Link takes ~3 seconds to come up, so use same timeout as Networking_EnsureReady
+	return WaitUntilReady(Net_CheckIFLinkStatus, 10) == 0;
+}
+
+// Returns whether a network adapter is available
+static cc_bool Networking_LoadIOPModules(void) {
 	int ret;
-	
+
 	SifLoadBuffer(ps2dev9_irx);
+	if (ret < 0) return false;
 	SifLoadBuffer(netman_irx);
+	if (ret < 0) return false;
+	// SMAP fails to load when there's no network adapter
 	SifLoadBuffer(smap_irx);
+	return ret >= 0;
 }
 
 /*########################################################################################################################*
@@ -546,8 +700,10 @@ static cc_bool ParseIPv6(const char* ip, int port, cc_sockaddr* dst) {
 static cc_result ParseHost(const char* host, int port, cc_sockaddr* addrs, int* numValidAddrs) {
 	struct sockaddr_in* addr4 = (struct sockaddr_in*)addrs[0].data;
 	ip4_addr_t addr;
+	cc_result res = Networking_EnsureReady();
+	if (res) return res;
 
-	int res = netconn_gethostbyname(host, &addr);
+	res = netconn_gethostbyname(host, &addr);
 	//if (res == -NO_DATA) return SOCK_ERR_UNKNOWN_HOST;
 	if (res) return res;
 
@@ -569,6 +725,8 @@ static cc_result GetSocketError(cc_socket s) {
 
 cc_result Socket_Create(cc_socket* s, cc_sockaddr* addr) {
 	struct sockaddr* raw = (struct sockaddr*)addr->data;
+	cc_result res = Networking_EnsureReady();
+	if (res) { *s = -1; return res; }
 
 	*s = lwip_socket(raw->sa_family, SOCK_STREAM, 0);
 	if (*s < 0) return *s;
@@ -583,6 +741,7 @@ cc_result Socket_SetNonBlocking(cc_socket s, cc_bool nonblocking) {
 }
 
 void Socket_Close(cc_socket s) {
+	if (s < 0) return;
 	lwip_shutdown(s, SHUT_RDWR);
 	lwip_close(s);
 }
@@ -598,9 +757,8 @@ cc_result Socket_Read(cc_socket s, cc_uint8* data, cc_uint32 count, cc_uint32* m
 	//Platform_Log1(" .. read %i", &recvCount);
 	if (recvCount != -1) { *modified = recvCount; return 0; }
 	
-	int ERR = GetSocketError(s);
-	Platform_Log1("ERR: %i", &ERR);
-	*modified = 0; return ERR;
+	/* NOTE: SO_ERROR is 0 for EWOULDBLOCK, so it must be read from errno instead */
+	*modified = 0; return errno;
 }
 
 cc_result Socket_Write(cc_socket s, const cc_uint8* data, cc_uint32 count, cc_uint32* modified) {
@@ -609,9 +767,7 @@ cc_result Socket_Write(cc_socket s, const cc_uint8* data, cc_uint32 count, cc_ui
 	//Platform_Log1(" .. wrote %i", &sentCount);
 	if (sentCount != -1) { *modified = sentCount; return 0; }
 	
-	int ERR = GetSocketError(s);
-	Platform_Log1("ERW: %i", &ERR);
-	*modified = 0; return ERR;
+	*modified = 0; return errno;
 }
 
 cc_result Socket_Poll(cc_socket s, int timeoutMS, int mode, cc_bool* success) {
@@ -657,20 +813,103 @@ static void USBStorage_LoadIOPModules(void) {
 	SifLoadBuffer(ps2kbd_irx);
 }
 
-// TODO Maybe needed ???
-/*
-static void USBStorage_WaitUntilDeviceReady() {
-	io_stat_t sb;
-	Thread_Sleep(50);
-
-	for (int retry = 0; retry < 50; retry++)
+// USB devices are detected asynchronously by BDM after the modules are loaded,
+//  so "mass:/" may not be accessible immediately after startup
+static cc_bool USBStorage_WaitUntilDeviceReady(int retries) {
+	for (int retry = 0; retry < retries; retry++)
 	{
-		if (fioGetstat("mass:/", &sb) >= 0) return;
-		
-    	nopdelay();
-    }
-    Platform_LogConst("USB device still not ready ??");
-}*/
+		int fd = fioDopen("mass:/");
+		if (fd >= 0) { fioDclose(fd); return true; }
+
+		Thread_Sleep(100);
+	}
+	return false;
+}
+
+
+/*########################################################################################################################*
+*-------------------------------------------------------Filesystem--------------------------------------------------------*
+*#########################################################################################################################*/
+static void GetBootDevice(int argc, char** argv) {
+	if (argc < 1 || !argv[0]) return;
+	const char* path = argv[0];
+
+	// e.g. "mass:/APPS/ClassiCube.elf" -> "mass"
+	for (int i = 0; i < sizeof(boot_device) - 1 && path[i]; i++)
+	{
+		if (path[i] != ':') continue;
+
+		Mem_Copy(boot_device, path, i);
+		boot_device[i] = '\0';
+		return;
+	}
+}
+
+// MCMAN rejects accesses to a card until it has been detected using mcGetInfo
+static cc_bool MemoryCard_IsReady(int port) {
+	static cc_bool inited;
+	int type = 0, free = 0, format = 0, ret = -1;
+
+	if (!inited) {
+		ret = mcInit(MC_TYPE_MC);
+		if (ret < 0) { Platform_Log1("mcInit failed: %i", &ret); return false; }
+		inited = true;
+	}
+
+	mcGetInfo(port, 0, &type, &free, &format);
+	mcSync(0, NULL, &ret);
+
+	// 0 = same card as last time, -1 = a different formatted card was inserted
+	if (ret != 0 && ret != -1) return false;
+	return type == MC_TYPE_PS2 && format;
+}
+
+// e.g. both "mass" and "mass0" count as booting from "mass"
+static cc_bool BootedFrom(const char* device) {
+	cc_string boot = String_FromReadonly(boot_device);
+	cc_string dev  = String_FromReadonly(device);
+	return String_CaselessStarts(&boot, &dev);
+}
+
+static cc_bool TryUseRoot(const char* root) {
+	cc_filepath* path = FILEPATH_RAW(root);
+	cc_result res     = Directory_Create2(path);
+	int fd;
+
+	// Make sure the directory can actually be accessed
+	// NOTE: Creating can 'fail' just because it already exists, as e.g. MCMAN
+	//  returns -4 instead of an 'already exists' error, so always check this
+	fd = fioDopen(root);
+	if (fd < 0) {
+		Platform_Log3("Can't use %c as root directory: %e (open %i)", root, &res, &fd);
+		return false;
+	}
+	fioDclose(fd);
+
+	root_path.length = 0;
+	String_AppendConst(&root_path, root);
+	String_Append(&root_path, '/');
+	Platform_Log1("Using %s as root directory", &root_path);
+	return true;
+}
+
+static void InitFilesystem(void) {
+	Platform_Log1("Boot device: %c", boot_device);
+	// Launched through PCSX2 or ps2link, so store data next to the executable
+	if (BootedFrom("host") && TryUseRoot("host:ClassiCube")) return;
+
+	// Wait longer when launched from USB, since the device is known to exist
+	if (USBStorage_WaitUntilDeviceReady(BootedFrom("mass") ? 30 : 10)
+		&& TryUseRoot("mass:/ClassiCube")) return;
+
+	if (MemoryCard_IsReady(0) && TryUseRoot("mc0:/ClassiCube")) return;
+	if (MemoryCard_IsReady(1) && TryUseRoot("mc1:/ClassiCube")) return;
+
+	Platform_ReadonlyFilesystem = true;
+	String_AppendConst(&root_path, "mass:/ClassiCube/");
+	Window_ShowDialog("Data persistence warning",
+		"No USB drive or memory card found\nNote that settings and maps cannot be saved");
+}
 
 
 /*########################################################################################################################*
@@ -724,15 +963,15 @@ static void SetupIOPCore(void) {
 }
 
 void Platform_Init(void) {
+	ChangeThreadPriority(GetThreadId(), MAIN_THREAD_PRIO);
 	USBStorage_LoadIOPModules();
-	//USBStorage_WaitUntilDeviceReady();
-	
-	Networking_LoadIOPModules();
-	Networking_Setup();
-	
-	cc_filepath* root = FILEPATH_RAW("mass:/ClassiCube");
-	int res = Directory_Create2(root);
-	Platform_Log1("ROOT DIRECTORY CREATE %i", &res);
+	InitFilesystem();
+
+	if (Networking_LoadIOPModules()) {
+		Networking_Setup();
+	} else {
+		Platform_LogConst("No network adapter found");
+	}
 }
 
 void Platform_Free(void) { }

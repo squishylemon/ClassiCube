@@ -530,8 +530,9 @@ struct CustomModel* CustomModel_Get(int id) {
 	if (id >= MAX_CUSTOM_MODELS) return NULL;
 
 	/* TODO log message if allocation fails? */
+	/* NOTE: Must be cleared, otherwise CustomModel_Undefine frees garbage pointers */
 	if (!custom_models)
-		custom_models = (struct CustomModel*)Mem_TryAlloc(MAX_CUSTOM_MODELS, sizeof(struct CustomModel));
+		custom_models = (struct CustomModel*)Mem_TryAllocCleared(MAX_CUSTOM_MODELS, sizeof(struct CustomModel));
 
 	if (!custom_models) return NULL;
 	return &custom_models[id];

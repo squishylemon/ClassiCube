@@ -19,7 +19,7 @@ default: $(TARGET)-min.elf
 #---------------------------------------------------------------------------------
 # Code generation
 #---------------------------------------------------------------------------------
-LIBS	:= -lpatches -lpad -ldma -lgraph -lc -lps2ip -lnetman -lmc -lmouse -lkbd
+LIBS	:= -lpatches -lpad -ldma -lgraph -lc -lps2ip -lnetman -lmc -lmouse -lkbd -laudsrv
 
 CFLAGS 	:= -D_EE -G0 -O2 -Wall -gdwarf-2 -gz -DPLAT_PS2 \
 				-I$(PS2SDK)/ee/include -I$(PS2SDK)/common/include
@@ -45,7 +45,8 @@ VCL 	:= openvcl/openvcl
 IOP_SRCS := ps2dev9 netman smap \
 			bdm bdmfs_fatfs \
 			usbd usbmass_bd usbhdfsd \
-			ps2mouse ps2kbd
+			ps2mouse ps2kbd \
+			libsd audsrv
 
 IOP_MODS := $(patsubst %,$(BUILD_DIR)/%_irx.o,$(IOP_SRCS))
 OBJECTS += $(IOP_MODS)
@@ -84,11 +85,35 @@ src/ps2/Graphics_PS2.c: $(SHDR_OBJS)
 # executable generation
 #---------------------------------------------------------------------------------
 OEXT		:= .elf
-GEN_FILES 	:= $(TARGET)-min.elf
+GEN_FILES 	:= $(TARGET)-min.elf $(TARGET).iso
 include misc/makefiles/common_build.mk
+
+# ClassiCube textures and sounds are embedded into the executable using .incbin
+$(BUILD_DIR)/src/TexturePack.o: misc/cc_textures.zip
+$(BUILD_DIR)/src/Audio.o: misc/cc_audio.zip
 
 $(TARGET)-min.elf: $(TARGET).elf
 	$(STRIP) $< -o $@
+
+
+#---------------------------------------------------------------------------------
+# disc image generation
+#---------------------------------------------------------------------------------
+ISO_DIR := $(BUILD_DIR)/iso
+
+# Textures and sounds are built into the executable, while music is streamed from the disc
+# (needs xorriso, e.g. 'apk add xorriso' in the ps2dev Docker image)
+MUSIC_FILES := $(wildcard misc/music/*.wav)
+
+$(TARGET).iso: $(TARGET)-min.elf misc/ps2/SYSTEM.CNF $(MUSIC_FILES)
+	rm -rf $(ISO_DIR)
+	mkdir -p $(ISO_DIR)/MUSIC
+	cp misc/ps2/SYSTEM.CNF $(ISO_DIR)/SYSTEM.CNF
+	cp $(TARGET)-min.elf $(ISO_DIR)/CLASSICU.ELF
+	for f in $(MUSIC_FILES); do cp $$f $(ISO_DIR)/MUSIC/$$(basename $$f | tr a-z A-Z); done
+	xorriso -as mkisofs -quiet -iso-level 1 -sysid PLAYSTATION -V CLASSICUBE -o $@ $(ISO_DIR)
+
+iso: $(TARGET).iso
 
 
 #---------------------------------------------------------------------------------

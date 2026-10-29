@@ -197,7 +197,7 @@ static int Menu_PadAxis(void* screen, struct PadAxisUpdate* upd) {
 }
 
 static void AddPrimaryButton(void* screen, struct ButtonWidget* btn, Widget_LeftClick click) {
-	int width = Game_ClassicMode ? 400 : (Window_Main.Width < 300 ? 200 : 400);
+	int width = Game_ClassicMode ? 400 : (Gui_AreaWidth() < 300 ? 200 : 400);
 	ButtonWidget_Add(screen, btn, width, click);
 }
 
@@ -227,7 +227,12 @@ static void Menu_SwitchHacks(void* a, void* b)     { HacksSettingsScreen_Show();
 static void Menu_SwitchEnv(void* a, void* b)       { EnvSettingsScreen_Show(); }
 static void Menu_SwitchNostalgia(void* a, void* b) { NostalgiaMenuScreen_Show(); }
 
+#ifdef CC_BUILD_PS2
+/* Map size is chosen with Small/Normal/Huge buttons, as typing it in with a controller is slow */
+static void Menu_SwitchGenLevel(void* a, void* b)        { ClassicGenScreen_Show(); }
+#else
 static void Menu_SwitchGenLevel(void* a, void* b)        { GenLevelScreen_Show(); }
+#endif
 static void Menu_SwitchClassicGenLevel(void* a, void* b) { ClassicGenScreen_Show(); }
 static void Menu_SwitchLoadLevel(void* a, void* b)       { LoadLevelScreen_Show(); }
 static void Menu_SwitchSaveLevel(void* a, void* b)       { SaveLevelScreen_Show(); }
@@ -537,7 +542,12 @@ static void PauseScreen_Layout(void* screen) {
 	struct PauseScreen* s = (struct PauseScreen*)screen;
 	Menu_LayoutButtons(s->btns, s->descs, s->descsCount);
 	Menu_LayoutBack(&s->back);
+#ifdef CC_BUILD_PS2
+	/* Directly above 'Back to game', so it's easy to reach with a controller */
+	Widget_SetLocation(&s->quit,  ANCHOR_CENTRE, ANCHOR_MAX,    0,   75);
+#else
 	Widget_SetLocation(&s->quit,  ANCHOR_MAX,    ANCHOR_MAX,    5,    5);
+#endif
 	Widget_SetLocation(&s->title, ANCHOR_CENTRE, ANCHOR_CENTRE, 0, -100);
 }
 
@@ -560,8 +570,16 @@ static void PauseScreen_Init(void* screen) {
 
 	s->descs      = descs;
 	s->descsCount = Array_Elems(descs);
+#ifdef CC_BUILD_PS2
+	/* Added before 'Back to game', as it's now above it */
+	TextWidget_Add(s,   &s->title);
+	Menu_AddButtons(s,  s->btns, 300, s->descs, s->descsCount);
+	AddPrimaryButton(s, &s->quit, PauseScreenBase_Quit);
+	AddPrimaryButton(s, &s->back, PauseScreenBase_Game);
+#else
 	PauseScreenBase_AddWidgets(s, 300);
 	ButtonWidget_Add(s, &s->quit, 120, PauseScreenBase_Quit);
+#endif
 	s->maxVertices = Screen_CalcDefaultMaxVertices(s);
 
 	if (Server.IsSinglePlayer) return;
@@ -1233,7 +1251,7 @@ static const struct ScreenVTABLE GenLevelScreen_VTABLE = {
 	GenLevelScreen_Layout,      GenLevelScreen_ContextLost, GenLevelScreen_ContextRecreated,
 	Menu_PadAxis
 };
-void GenLevelScreen_Show(void) {	
+void GenLevelScreen_Show(void) {
 	struct GenLevelScreen* s = &GenLevelScreen;
 	s->grabsInput = true;
 	s->closable   = true;

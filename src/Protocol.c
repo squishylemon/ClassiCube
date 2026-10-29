@@ -357,7 +357,16 @@ struct MapState {
 	cc_uint8 size[MAP_SIZE_LEN];
 	int index, sizeIndex;
 	cc_bool allocFailed;
+#ifdef CC_BUILD_COMPACTMAP
+	cc_bool staged; /* blocks are stored by World_BeginStagedMap instead */
+#endif
 };
+
+#ifdef CC_BUILD_COMPACTMAP
+#define MapState_HasBlocks(m) ((m)->staged)
+#else
+#define MapState_HasBlocks(m) ((m)->blocks != NULL)
+#endif
 static struct MapState map1;
 #ifdef EXTENDED_BLOCKS
 static struct MapState map2;
@@ -380,6 +389,9 @@ static void MapState_Init(struct MapState* m) {
 	m->blocks      = NULL;
 	m->sizeIndex   = 0;
 	m->allocFailed = false;
+#ifdef CC_BUILD_COMPACTMAP
+	m->staged      = false;
+#endif
 }
 
 static CC_INLINE void MapState_SkipHeader(struct MapState* m) {
@@ -388,7 +400,11 @@ static CC_INLINE void MapState_SkipHeader(struct MapState* m) {
 }
 
 static void FreeMapStates(void) {
-	Mem_Free(map1.blocks);
+#ifdef CC_BUILD_COMPACTMAP
+	if (map1.staged) World_FreeStagedMap();
+	map1.staged = false;
+#endif
+	World_FreeBlocks(map1.blocks, map_volume);
 	map1.blocks = NULL;
 #ifdef EXTENDED_BLOCKS
 	Mem_Free(map2.blocks);
@@ -414,8 +430,36 @@ static cc_result MapState_Read(struct MapState* m) {
 
 	if (!map_volume) map_volume = Mem_ReadU32_BE(m->size);
 
+#ifdef CC_BUILD_COMPACTMAP
+	if (!m->staged) {
+		if (!World_BeginStagedMap(map_volume)) {
+			Window_ShowDialog("Out of memory", "Not enough free memory to join that map.\nTry joining a different map.");
+			m->allocFailed = true;
+			return 0;
+		}
+		m->staged = true;
+	}
+
+	/* Staging buffer only holds part of the map, so need to decompress in multiple steps */
+	while (m->index < map_volume)
+	{
+		BlockRaw* dst = World_GetStagingBuffer(m->index, &left);
+		res = m->stream.Read(&m->stream, dst, left, &read);
+		m->index += read;
+
+		if (!World_StagedBlocksWritten(m->index)) {
+			/* Free as much memory as possible first, as showing the dialog needs memory too */
+			FreeMapStates();
+			Window_ShowDialog("Out of memory", "Not enough free memory to join that map.\nTry joining a different map.");
+			m->allocFailed = true;
+			return 0;
+		}
+		if (res || !read) return res;
+	}
+	return 0;
+#else
 	if (!m->blocks) {
-		m->blocks = (BlockRaw*)Mem_TryAlloc(map_volume, 1);
+		m->blocks = World_TryAllocBlocks(map_volume);
 		/* unlikely but possible */
 		if (!m->blocks) {
 			Window_ShowDialog("Out of memory", "Not enough free memory to join that map.\nTry joining a different map.");
@@ -429,6 +473,7 @@ static cc_result MapState_Read(struct MapState* m) {
 
 	m->index += read;
 	return res;
+#endif
 }
 
 
@@ -618,9 +663,10 @@ static void Classic_LevelFinalise(cc_uint8* data) {
 	volume = width * height * length;
 
 	if (map1.allocFailed) {
+		int sizeMB = (int)((map_volume + 1024 * 1024 - 1) / (1024 * 1024));
 		Chat_AddRaw("&cFailed to load map, try joining a different map");
-		Chat_AddRaw("   &cNot enough free memory to load the map");
-	} else if (!map1.blocks) {
+		Chat_Add1(  "   &cNot enough free memory to load the map (needs %i MB)", &sizeMB);
+	} else if (!MapState_HasBlocks(&map1)) {
 		Chat_AddRaw("&cFailed to load map, try joining a different map");
 		Chat_AddRaw("   &cAttempted to load map without a Blocks array");
 	} else if (map_volume != volume) {
@@ -640,8 +686,17 @@ static void Classic_LevelFinalise(cc_uint8* data) {
 	}
 	map2.blocks = NULL;
 #endif
+#ifdef CC_BUILD_COMPACTMAP
+	if (map1.staged) {
+		World_SetNewStagedMap(width, height, length);
+	} else {
+		World_SetNewMap(NULL, width, height, length);
+	}
+	map1.staged = false;
+#else
 	World_SetNewMap(map1.blocks, width, height, length);
 	map1.blocks  = NULL;
+#endif
 }
 
 static void Classic_SetBlock(cc_uint8* data) {

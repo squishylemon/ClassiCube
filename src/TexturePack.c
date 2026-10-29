@@ -521,6 +521,19 @@ cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** d
 	return res;
 }
 
+#ifdef CC_BUILD_BUNDLED_TEXTURES
+/* ClassiCube's own textures */
+CC_EMBED_FILE(ccBundledTextures, "misc/cc_textures.zip")
+
+cc_bool TexturePack_OpenBundled(struct Stream* stream, const cc_string* path) {
+	if (!String_CaselessEqualsConst(path, "texpacks/classicube.zip")) return false;
+
+	Stream_ReadonlyMemory(stream, (void*)ccBundledTextures,
+						(cc_uint32)(ccBundledTexturesEnd - ccBundledTextures));
+	return true;
+}
+#endif
+
 
 static cc_bool SelectZipEntry(const cc_string* path) { return true; }
 static cc_result ProcessZipEntry(const cc_string* path, struct Stream* stream, struct ZipEntry* source) {
@@ -607,6 +620,9 @@ static cc_result ExtractFromFile(const cc_string* path) {
 
 	Platform_EncodePath(&raw_path, path);
 	res = Stream_OpenPath(&stream, &raw_path);
+#ifdef CC_BUILD_BUNDLED_TEXTURES
+	if (ReturnCode_IsNotFound(res) && TexturePack_OpenBundled(&stream, path)) res = 0;
+#endif
 	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
 
 	res = ExtractFrom(&stream, path);

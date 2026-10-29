@@ -30,6 +30,11 @@ static cc_bool Builder_FullBright;
 static int Builder_ChunkEndX, Builder_ChunkEndZ;
 static int Builder_Offsets[FACE_COUNT] = { -1,1, -EXTCHUNK_SIZE,EXTCHUNK_SIZE, -EXTCHUNK_SIZE_2,EXTCHUNK_SIZE_2 };
 
+#ifdef CC_BUILD_GROWFACES
+/* 1/64 of a block covers rounding cracks even far away, while only being 1/4 of a texel */
+#define FACE_GROW_AMOUNT (1.0f / 64)
+#endif
+
 static int (*Builder_StretchXLiquid)(int countIndex, int x, int y, int z, int chunkIndex, BlockID block);
 static int (*Builder_StretchX)(int countIndex, int x, int y, int z, int chunkIndex, BlockID block, Face face);
 static int (*Builder_StretchZ)(int countIndex, int x, int y, int z, int chunkIndex, BlockID block, Face face);
@@ -262,13 +267,17 @@ for (yy = -1; yy < 17; ++yy) {\
 }
 
 static cc_bool ReadChunkData(int x1, int y1, int z1, cc_bool* outAllAir) {
+#ifndef CC_BUILD_COMPACTMAP
 	BlockRaw* blocks = World.Blocks;
+#endif
 	cc_bool allAir = true, allSolid = true;
 	int index, cIndex;
 	BlockID block;
 	int xx, yy, zz, y;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	ReadChunkBody(World_GetBlock(x1 + xx, y, z1 + zz));
+#elif !defined EXTENDED_BLOCKS
 	ReadChunkBody(blocks[index]);
 #else
 	BlockRaw* blocks2;
@@ -312,14 +321,18 @@ for (yy = -1; yy < 17; ++yy) {\
 }
 
 static cc_bool ReadBorderChunkData(int x1, int y1, int z1, cc_bool* outAllAir) {
+#ifndef CC_BUILD_COMPACTMAP
 	BlockRaw* blocks = World.Blocks;
+#endif
 	BlockRaw* blocks2;
 	cc_bool allAir = true;
 	int index, cIndex;
 	BlockID block;
 	int xx, yy, zz, x, y, z;
 
-#ifndef EXTENDED_BLOCKS
+#if defined CC_BUILD_COMPACTMAP
+	ReadBorderChunkBody(World_GetBlock(x, y, z));
+#elif !defined EXTENDED_BLOCKS
 	ReadBorderChunkBody(blocks[index]);
 #else
 	if (World.IDMask <= 0xFF) {
@@ -694,6 +707,18 @@ static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 	min = Blocks.RenderMinBB[Builder_Block]; max = Blocks.RenderMaxBB[Builder_Block];
 	Drawer.X1 = x + min.x; Drawer.Y1 = y + min.y; Drawer.Z1 = z + min.z;
 	Drawer.X2 = x + max.x; Drawer.Y2 = y + max.y; Drawer.Z2 = z + max.z;
+
+#ifdef CC_BUILD_GROWFACES
+	/* Runs of identical faces are merged into one long face, so where a long face meets several */
+	/*  shorter ones (a T-junction), their edges can be rounded differently and leave tiny cracks */
+	/*  the background shows through. With low precision GPUs (e.g. PS2 uses 1/16 pixel) this is */
+	/*  very noticeable, so slightly grow faces so that neighbouring faces overlap instead. */
+	/* (not done for translucent faces such as water, as overlaps there would be blended twice) */
+	if (!baseOffset) {
+		Drawer.X1 -= FACE_GROW_AMOUNT; Drawer.Y1 -= FACE_GROW_AMOUNT; Drawer.Z1 -= FACE_GROW_AMOUNT;
+		Drawer.X2 += FACE_GROW_AMOUNT; Drawer.Y2 += FACE_GROW_AMOUNT; Drawer.Z2 += FACE_GROW_AMOUNT;
+	}
+#endif
 
 	Drawer.Tinted  = Blocks.Tinted[Builder_Block];
 	Drawer.TintCol = Blocks.FogCol[Builder_Block];

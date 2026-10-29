@@ -20,6 +20,14 @@ Copyright 2014-2025 ClassiCube | Licensed under BSD-3
 
 union IntAndFloat { float f; cc_int32 i; cc_uint32 u; };
 
+/* Embeds the contents of a file into the executable, accessible from name[] up to nameEnd[] */
+/* NOTE: path is relative to the directory the compiler is run from (i.e. the root directory) */
+#define CC_EMBED_FILE(name, path) \
+__asm__(".section .rodata\n.balign 4\n" \
+	".global " #name "\n" #name ":\n.incbin \"" path "\"\n" \
+	".global " #name "End\n" #name "End:\n.previous\n"); \
+extern const cc_uint8 name[]; extern const cc_uint8 name##End[];
+
 #define QuickSort_Swap_Maybe()\
 if (i <= j) {\
 	key = keys[i]; keys[i] = keys[j]; keys[j] = key;\

@@ -841,7 +841,7 @@ static void OnInputDown(void* obj, int key, cc_bool was, struct InputDevice* dev
 	if (Input.DownHook && Input.DownHook(key, device)) return;
 
 #ifndef CC_BUILD_WEB
-	if (key == device->escapeButton && (s = Gui_GetClosable())) {
+	if (InputDevice_IsBack(key, device) && (s = Gui_GetClosable())) {
 		/* Don't want holding down escape to go in and out of pause menu */
 		if (!was) Gui_Remove(s);
 		return;

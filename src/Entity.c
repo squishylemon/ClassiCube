@@ -1095,18 +1095,35 @@ cc_bool LocalPlayer_CheckCanZoom(struct LocalPlayer* p) {
 	return false;
 }
 
+#ifdef CC_BUILD_SPLITSCREEN
+/* Spreads out local players along the X axis, so they don't all spawn inside each other */
+static void OffsetSplitscreenSpawn(struct LocalPlayer* p, int i, struct LocationUpdate* update) {
+	static const float offsets[MAX_LOCAL_PLAYERS] = { 0.0f, 1.5f, -1.5f, 3.0f };
+	float x = update->pos.x + offsets[i];
+
+	if (!i || !(update->flags & LU_HAS_POS)) return;
+	if (x < 0.0f || x >= (float)World.Width) return;
+	update->pos = Respawn_FindSpawnPosition(x, update->pos.z, p->Base.Size);
+}
+#endif
+
 void LocalPlayers_MoveToSpawn(struct LocationUpdate* update) {
+	struct LocationUpdate playerUpdate;
 	struct LocalPlayer* p;
 	int i;
-	
+
 	for (i = 0; i < Game_NumStates; i++)
 	{
 		p = &LocalPlayer_Instances[i];
-		p->Base.VTABLE->SetLocation(&p->Base, update);
-		
-		if (update->flags & LU_HAS_POS)   p->Spawn      = update->pos;
-		if (update->flags & LU_HAS_YAW)   p->SpawnYaw   = update->yaw;
-		if (update->flags & LU_HAS_PITCH) p->SpawnPitch = update->pitch;
+		playerUpdate = *update;
+#ifdef CC_BUILD_SPLITSCREEN
+		OffsetSplitscreenSpawn(p, i, &playerUpdate);
+#endif
+		p->Base.VTABLE->SetLocation(&p->Base, &playerUpdate);
+
+		if (playerUpdate.flags & LU_HAS_POS)   p->Spawn      = playerUpdate.pos;
+		if (playerUpdate.flags & LU_HAS_YAW)   p->SpawnYaw   = playerUpdate.yaw;
+		if (playerUpdate.flags & LU_HAS_PITCH) p->SpawnPitch = playerUpdate.pitch;
 	}
 	
 	/* TODO: This needs to be before new map... */

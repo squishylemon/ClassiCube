@@ -77,6 +77,19 @@ void Audio_FreeChunks(struct AudioChunk* chunks, int numChunks);
 extern struct AudioContext music_ctx;
 void Audio_Warn(cc_result res, const char* action);
 
+#ifdef CC_BUILD_COMPACTMUSIC
+/* Music is stored as mono IMA ADPCM .wav files, which take up less space */
+/*  than the original .ogg files and are much cheaper to decode */
+#define ADPCM_BLOCK_ALIGN   512
+#define ADPCM_BLOCK_SAMPLES ((ADPCM_BLOCK_ALIGN - 4) * 2 + 1)
+struct AdpcmState { int predictor, index; };
+
+/* Encodes the given sample into a 4 bit nibble, updating the state */
+int Adpcm_EncodeSample(struct AdpcmState* s, int sample);
+/* Decodes the given 4 bit nibble into a sample, updating the state */
+int Adpcm_DecodeSample(struct AdpcmState* s, int nibble);
+#endif
+
 cc_result AudioPool_Play(struct AudioData* data);
 void AudioPool_Close(void);
 

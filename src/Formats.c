@@ -27,9 +27,32 @@ static struct MapImporter* imp_tail;
 /*########################################################################################################################*
 *--------------------------------------------------------General----------------------------------------------------------*
 *#########################################################################################################################*/
+/* Writes all of the world's blocks, in packed index order */
+static cc_result WriteWorldBlocks(struct Stream* stream) {
+#ifdef CC_BUILD_COMPACTMAP
+	BlockRaw buffer[4096];
+	int x, y, z, count = 0;
+	cc_result res;
+
+	for (y = 0; y < World.Height; y++)
+		for (z = 0; z < World.Length; z++)
+			for (x = 0; x < World.Width; x++)
+	{
+		buffer[count++] = (BlockRaw)World_GetBlock(x, y, z);
+		if (count < (int)sizeof(buffer)) continue;
+
+		if ((res = Stream_Write(stream, buffer, count))) return res;
+		count = 0;
+	}
+	return count ? Stream_Write(stream, buffer, count) : 0;
+#else
+	return Stream_Write(stream, World.Blocks, World.Volume);
+#endif
+}
+
 static cc_result Map_ReadBlocks(struct Stream* stream) {
 	World.Volume = World.Width * World.Length * World.Height;
-	World.Blocks = (BlockRaw*)Mem_TryAlloc(World.Volume, 1);
+	World.Blocks = World_TryAllocBlocks(World.Volume);
 
 	if (!World.Blocks) return ERR_OUT_OF_MEMORY;
 	return Stream_Read(stream, World.Blocks, World.Volume);
@@ -72,6 +95,8 @@ cc_result Map_LoadFrom(const cc_string* path) {
 
 	Game_Reset();
 	spawn_point = &update;
+	/* Some importers (e.g. .cw) allocate the blocks array themselves while parsing */
+	World_FreeSpareBlocks();
 
 	Platform_EncodePath(&raw_path, path);
 	res = Stream_OpenPath(&stream, &raw_path);
@@ -1263,7 +1288,7 @@ static cc_result Dat_LoadFormat0(struct Stream* stream) {
 
 	#define PC_VOLUME (256 * 64 * 256)
 	World.Volume = PC_VOLUME;
-	World.Blocks = (BlockRaw*)Mem_TryAlloc(PC_VOLUME, 1);
+	World.Blocks = World_TryAllocBlocks(PC_VOLUME);
 	if (!World.Blocks) return ERR_OUT_OF_MEMORY;
 
 	/* First 5 bytes already read earlier as .dat header */
@@ -1607,7 +1632,7 @@ cc_result Cw_Save(struct Stream* stream) {
 	cur = Nbt_WriteArray(cur, "BlockArray", World.Volume);
 
 	if ((res = Stream_Write(stream, buffer, (int)(cur - buffer)))) return res;
-	if ((res = Stream_Write(stream, World.Blocks, World.Volume)))  return res;
+	if ((res = WriteWorldBlocks(stream)))  return res;
 
 #ifdef EXTENDED_BLOCKS
 	if (World.Blocks != World.Blocks2) {
@@ -1715,7 +1740,7 @@ cc_result Schematic_Save(struct Stream* stream) {
 		Mem_WriteU32_BE(&tmp[74], World.Volume);
 	}
 	if ((res = Stream_Write(stream, tmp, sizeof(sc_begin)))) return res;
-	if ((res = Stream_Write(stream, World.Blocks, World.Volume))) return res;
+	if ((res = WriteWorldBlocks(stream))) return res;
 
 	Mem_Copy(tmp, sc_data, sizeof(sc_data));
 	{

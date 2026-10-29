@@ -178,6 +178,10 @@ run:
 	@echo "NOTE: Skipping 'run' due to not being the only goal (all goals: $(MAKECMDGOALS))"
 endif
 
+# Compiles for platform and then produces a disc image (e.g. 'make ps2 iso')
+iso:
+	@:
+
 # Compiles for platform and then produces a distributable version
 ifeq ($(MAKECMDGOALS),dist)
 dist:

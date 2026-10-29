@@ -49,7 +49,7 @@ void Camera_KeyLookUpdate(float delta) {
 *#########################################################################################################################*/
 static void PerspectiveCamera_GetProjection(struct Matrix* proj) {
 	float fovy = Camera.Fov * MATH_DEG2RAD;
-	float aspectRatio = (float)Game.Width / (float)Game.Height;
+	float aspectRatio = (float)Game_ViewWidth() / (float)Game_ViewHeight();
 	Gfx_CalcPerspectiveMatrix(proj, fovy, aspectRatio, (float)Game_ViewDistance);
 }
 

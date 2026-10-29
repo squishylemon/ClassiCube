@@ -658,8 +658,7 @@ static void LimitFPS(void) {
 }
 #endif
 
-static CC_INLINE void Game_DrawFrame(float delta, float t) {
-	int i;
+static CC_INLINE void Game_Draw3D(float delta, float t) {
 	/* int MS = delta * 1000; Platform_Log1("ELAPSED: %i ms", &MS); */
 
 	if (!Gui_GetBlocksWorld()) {
@@ -675,13 +674,22 @@ static CC_INLINE void Game_DrawFrame(float delta, float t) {
 	} else {
 		RayTracer_SetInvalid(&Game_SelectedPos);
 	}
+}
 
-	Gfx_Begin2D(Game.Width, Game.Height);
-	Gui_RenderGui(delta);
+static void Game_Draw2DHooks(float delta) {
+	int i;
 	for (i = 0; i < Array_Elems(Game.Draw2DHooks); i++)
 	{
 		if (Game.Draw2DHooks[i]) Game.Draw2DHooks[i](delta);
 	}
+}
+
+static CC_INLINE void Game_DrawFrame(float delta, float t) {
+	Game_Draw3D(delta, t);
+
+	Gfx_Begin2D(Game.Width, Game.Height);
+	Gui_RenderGui(delta);
+	Game_Draw2DHooks(delta);
 
 /* TODO find a better solution than this */
 #ifdef CC_BUILD_3DS
@@ -690,16 +698,39 @@ static CC_INLINE void Game_DrawFrame(float delta, float t) {
 		Gfx_SetTopRight();
 		Gui_RenderGui(delta);
 	}
-	for (i = 0; i < Array_Elems(Game.Draw2DHooks); i++)
-	{
-		if (Game.Draw2DHooks[i]) Game.Draw2DHooks[i](delta);
-	}
+	Game_Draw2DHooks(delta);
 #endif
 	Gfx_End2D();
 }
 
 #ifdef CC_BUILD_SPLITSCREEN
-static void DrawSplitscreen(float delta, float t, int i, int x, int y, int w, int h) {
+/* 2 players are split into top and bottom halves, 3 players into three columns, */
+/*  and 4 players each get a quarter of the window */
+/* NOTE: Every player's view is the same size, so the GUI only needs to be laid out once */
+int Game_ViewWidth(void) {
+	int w = max(Window_Main.Width, 1);
+	if (Game_NumStates == 3) return w / 3;
+	return Game_NumStates == 4 ? w / 2 : w;
+}
+
+int Game_ViewHeight(void) {
+	int h = max(Window_Main.Height, 1);
+	if (Game_NumStates == 3) return h;
+	return Game_NumStates >= 2 ? h / 2 : h;
+}
+
+static void DrawSplitscreen(float delta, float t, int i) {
+	int w = Game_ViewWidth(), h = Game_ViewHeight();
+	int x, y;
+
+	if (Game_NumStates == 2) {
+		x = 0; y = i * h;
+	} else if (Game_NumStates == 3) {
+		x = i * w; y = 0;
+	} else {
+		x = (i & 1) * w; y = (i >> 1) * h;
+	}
+
 	Gfx_SetViewport(x, y, w, h);
 	Gfx_SetScissor( x, y, w, h);
 	Game.CurrentState = i;
@@ -707,8 +738,11 @@ static void DrawSplitscreen(float delta, float t, int i, int x, int y, int w, in
 	Entities.CurPlayer = &LocalPlayer_Instances[i];
 	LocalPlayer_SetInterpPosition(Entities.CurPlayer, t);
 	Camera.CurrentPos = Camera.Active->GetPosition(t);
-	
-	Game_DrawFrame(delta, t);
+
+	Game_Draw3D(delta, t);
+	Gfx_Begin2D(w, h);
+	Gui_RenderPlayerGui(delta);
+	Gfx_End2D();
 }
 
 int Game_MapState(int deviceIndex) {
@@ -794,24 +828,24 @@ void Game_RenderFrame(void) {
 	Gfx_ClearBuffers(GFX_BUFFER_COLOR | GFX_BUFFER_DEPTH);
 	
 #ifdef CC_BUILD_SPLITSCREEN
-	switch (Game_NumStates) {
-		case 1:
-			Game_DrawFrame(delta, t); break;
-		case 2:
-			DrawSplitscreen(delta, t, 0,  0,               0, Game.Width, Game.Height / 2);
-			DrawSplitscreen(delta, t, 1,  0, Game.Height / 2, Game.Width, Game.Height / 2);
-			break;
-		case 3:
-			DrawSplitscreen(delta, t, 0,              0,               0, Game.Width    , Game.Height / 2);
-			DrawSplitscreen(delta, t, 1,              0, Game.Height / 2, Game.Width / 2, Game.Height / 2);
-			DrawSplitscreen(delta, t, 2, Game.Width / 2, Game.Height / 2, Game.Width / 2, Game.Height / 2);
-			break;
-		case 4:
-			DrawSplitscreen(delta, t, 0,              0,               0, Game.Width / 2, Game.Height / 2);
-			DrawSplitscreen(delta, t, 1, Game.Width / 2,               0, Game.Width / 2, Game.Height / 2);
-			DrawSplitscreen(delta, t, 2,              0, Game.Height / 2, Game.Width / 2, Game.Height / 2);
-			DrawSplitscreen(delta, t, 3, Game.Width / 2, Game.Height / 2, Game.Width / 2, Game.Height / 2);
-			break;
+	if (Game_NumStates == 1) {
+		Game_DrawFrame(delta, t);
+	} else {
+		for (int i = 0; i < Game_NumStates; i++)
+		{
+			DrawSplitscreen(delta, t, i);
+		}
+
+		/* Menus, chat etc are drawn once across the entire window */
+		Game.CurrentState  = 0;
+		Entities.CurPlayer = &LocalPlayer_Instances[0];
+		Gfx_SetViewport(0, 0, Game.Width, Game.Height);
+		Gfx_SetScissor( 0, 0, Game.Width, Game.Height);
+
+		Gfx_Begin2D(Game.Width, Game.Height);
+		Gui_RenderSharedGui(delta);
+		Game_Draw2DHooks(delta);
+		Gfx_End2D();
 	}
 #else
 	Game_DrawFrame(delta, t);

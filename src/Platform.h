@@ -281,6 +281,15 @@ CC_API cc_result Directory_Enum(const cc_string* path, void* obj, Directory_Enum
 /* Returns non-zero if the given file exists. */
 int File_Exists(const cc_filepath* path);
 void Directory_GetCachePath(cc_string* path);
+#ifdef CC_BUILD_BUNDLED_MUSIC
+/* Returns the directory containing music bundled with the game (e.g. on the disc), or NULL if none */
+const char* Platform_BundledMusicDir(void);
+#endif
+#ifdef CC_BUILD_COMPACTMUSIC
+/* Returns how many kilobytes are free on the device that game data is stored on */
+/* Returns -1 if this is unknown, or is effectively unlimited (e.g. a USB drive) */
+int Directory_GetFreeSpaceKB(void);
+#endif
 
 /* Attempts to create a new (or overwrite) file for writing. */
 /* NOTE: If the file already exists, its contents are discarded. */
@@ -378,6 +387,11 @@ extern const cc_result ReturnCode_SocketDropped;
 /* If the input represents an IP address, then parses the input into a single IP address */
 /* Otherwise, attempts to resolve the input via DNS into one or more IP addresses */
 cc_result Socket_ParseAddress(const cc_string* address, int port, cc_sockaddr* addrs, int* numValidAddrs);
+#ifdef CC_BUILD_CHECKNETWORK
+/* Returns false if there's definitely no network connection (e.g. no network adapter or cable) */
+/* NOTE: Can block for a few seconds while waiting for the network link to come up */
+cc_bool Socket_NetworkAvailable(void);
+#endif
 /* Attempts to produce the string representation of the given socket address */
 cc_bool SockAddr_ToString(const cc_sockaddr* addr, cc_string* dst);
 

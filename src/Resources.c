@@ -322,6 +322,15 @@ static void MusicAssets_CheckExistence(void) {
 
 		Platform_EncodePath(&str, &path);
 		musicAssets[i].downloaded = File_Exists(&str);
+#ifdef CC_BUILD_COMPACTMUSIC
+		if (musicAssets[i].downloaded) continue;
+		/* Check for the converted .wav version too */
+		path.length -= 3;
+		String_AppendConst(&path, "wav");
+
+		Platform_EncodePath(&str, &path);
+		musicAssets[i].downloaded = File_Exists(&str);
+#endif
 	}
 }
 
@@ -349,14 +358,16 @@ CC_NOINLINE static int MusicAsset_Download(const char* hash) {
 	return Http_AsyncGetData(&url, 0);
 }
 
+#ifndef CC_BUILD_COMPACTMUSIC
 static void MusicAssets_DownloadAssets(void) {
 	int i;
-	for (i = 0; i < Array_Elems(musicAssets); i++) 
+	for (i = 0; i < Array_Elems(musicAssets); i++)
 	{
 		if (musicAssets[i].downloaded) continue;
 		musicAssets[i].reqID = MusicAsset_Download(musicAssets[i].hash);
 	}
 }
+#endif
 
 static const char* MusicAssets_GetRequestName(int reqID) {
 	int i;
@@ -368,6 +379,311 @@ static const char* MusicAssets_GetRequestName(int reqID) {
 }
 
 
+#ifdef CC_BUILD_COMPACTMUSIC
+/*########################################################################################################################*
+*---------------------------------------------------Music asset converting -----------------------------------------------*
+*#########################################################################################################################*/
+/* Music is converted to mono IMA ADPCM .wav files, with the sample rate lowered */
+/*  as needed so that all the music fits in the free space on the memory card. */
+/* Converting is spread across multiple ticks so that the launcher stays responsive */
+#define MUSIC_MAX_RATE     22050
+#define MUSIC_MIN_RATE      8000
+#define MUSIC_RESERVE_KB    1024 /* Leave room for options, saved maps, etc */
+#define MUSIC_WAV_HDR_SIZE    60
+#define MUSIC_ERR_NO_SPACE ERR_NOT_SUPPORTED
+#define WAV_FourCC(a, b, c, d) (((cc_uint32)a << 24) | ((cc_uint32)b << 16) | ((cc_uint32)c << 8) | (cc_uint32)d)
+
+static int music_next; /* Index of music asset currently being downloaded/converted */
+static cc_bool music_warnedSpace;
+
+static struct MusicConverter {
+	struct MusicAsset* music;
+	struct HttpRequest req;
+	struct Stream src;
+	struct OggState* ogg;
+	struct VorbisState* vorbis;
+	cc_int16* frame;
+	cc_uint8* data; /* Contents of the .wav file being generated */
+	cc_uint32 size, capacity, samples, inSamples;
+	int inRate, outRate, phase, accum, accumCount;
+	struct AdpcmState state;
+	int blockCount;
+	cc_int16 block[ADPCM_BLOCK_SAMPLES];
+} conv;
+
+static void MusicAssets_DownloadNext(void) {
+	for (; music_next < Array_Elems(musicAssets); music_next++)
+	{
+		if (musicAssets[music_next].downloaded) continue;
+		/* Only download one at a time, to avoid running out of memory */
+		musicAssets[music_next].reqID = MusicAsset_Download(musicAssets[music_next].hash);
+		return;
+	}
+}
+
+static void MusicAssets_DownloadAssets(void) {
+	music_next        = 0;
+	music_warnedSpace = false;
+	MusicAssets_DownloadNext();
+}
+
+/* Returns the number of samples per channel in an ogg stream, from the last page's granule position */
+static cc_uint32 MusicConverter_CountSamples(const cc_uint8* data, cc_uint32 size) {
+	cc_uint32 i;
+	if (size < 27) return 0;
+
+	for (i = size - 27; i > 0; i--)
+	{
+		if (data[i] != 'O' || data[i + 1] != 'g' || data[i + 2] != 'g' || data[i + 3] != 'S') continue;
+		return Mem_ReadU32_LE(data + i + 6);
+	}
+	return 0;
+}
+
+/* Returns the highest sample rate that leaves enough room for the remaining music, */
+/*  or 0 if there isn't enough space left for even this track at the lowest quality */
+static int MusicConverter_ChooseRate(cc_uint32 inSamples) {
+	int freeKB = Directory_GetFreeSpaceKB();
+	cc_uint64 budget, rate, minSize;
+	int i, remainingKB = 0;
+
+	if (freeKB < 0) return MUSIC_MAX_RATE;
+	freeKB -= MUSIC_RESERVE_KB;
+	if (freeKB <= 0 || !inSamples) return 0;
+
+	/* Share the free space between this and all the remaining tracks, based on their sizes */
+	for (i = music_next; i < Array_Elems(musicAssets); i++)
+	{
+		if (!musicAssets[i].downloaded) remainingKB += musicAssets[i].size;
+	}
+	budget = (cc_uint64)freeKB * 1024 * conv.music->size / remainingKB;
+
+	/* Every ADPCM_BLOCK_ALIGN bytes stores ADPCM_BLOCK_SAMPLES samples */
+	rate = budget * ADPCM_BLOCK_SAMPLES / ADPCM_BLOCK_ALIGN * conv.inRate / inSamples;
+	if (rate >= MUSIC_MAX_RATE) return MUSIC_MAX_RATE;
+	if (rate >= MUSIC_MIN_RATE) return (int)rate;
+
+	/* Not enough room for all the remaining music, but there might be enough for just this track */
+	minSize = (cc_uint64)inSamples * MUSIC_MIN_RATE / conv.inRate * ADPCM_BLOCK_ALIGN / ADPCM_BLOCK_SAMPLES;
+	return minSize + 4096 < (cc_uint64)freeKB * 1024 ? MUSIC_MIN_RATE : 0;
+}
+
+static void MusicConverter_Free(void) {
+	if (conv.vorbis) Vorbis_Free(conv.vorbis);
+	Mem_Free(conv.vorbis);
+	Mem_Free(conv.ogg);
+	Mem_Free(conv.frame);
+	Mem_Free(conv.data);
+	if (conv.music) HttpRequest_Free(&conv.req);
+	Mem_Set(&conv, 0, sizeof(conv));
+}
+
+static cc_result MusicConverter_Begin(struct MusicAsset* music, struct HttpRequest* req) {
+	cc_uint32 inSamples, outSamples;
+	cc_result res;
+	conv.music = music;
+	conv.req   = *req;
+
+	conv.ogg    = (struct OggState*)Mem_TryAlloc(1, sizeof(struct OggState));
+	conv.vorbis = (struct VorbisState*)Mem_TryAllocCleared(1, sizeof(struct VorbisState));
+	if (!conv.ogg || !conv.vorbis) return ERR_OUT_OF_MEMORY;
+
+	Stream_ReadonlyMemory(&conv.src, req->data, req->size);
+	Ogg_Init(conv.ogg, &conv.src);
+	Vorbis_Init(conv.vorbis);
+	conv.vorbis->source = conv.ogg;
+	if ((res = Vorbis_DecodeHeaders(conv.vorbis))) return res;
+
+	conv.frame = (cc_int16*)Mem_TryAlloc(conv.vorbis->blockSizes[1] * conv.vorbis->channels, 2);
+	if (!conv.frame) return ERR_OUT_OF_MEMORY;
+
+	conv.inRate    = conv.vorbis->sampleRate;
+	conv.inSamples = inSamples = MusicConverter_CountSamples(req->data, req->size);
+	conv.outRate   = MusicConverter_ChooseRate(inSamples);
+	if (!conv.outRate) return MUSIC_ERR_NO_SPACE;
+
+	/* Allocate enough for the entire .wav file upfront if possible */
+	outSamples    = (cc_uint32)((cc_uint64)inSamples * conv.outRate / conv.inRate);
+	conv.capacity = outSamples / ADPCM_BLOCK_SAMPLES * ADPCM_BLOCK_ALIGN + ADPCM_BLOCK_ALIGN * 4 + MUSIC_WAV_HDR_SIZE;
+	conv.data     = (cc_uint8*)Mem_TryAlloc(conv.capacity, 1);
+	if (!conv.data) return ERR_OUT_OF_MEMORY;
+
+	/* Header is written once all the samples are known */
+	conv.size = MUSIC_WAV_HDR_SIZE;
+	Platform_Log2("Converting %c to %i hz", music->name, &conv.outRate);
+	return 0;
+}
+
+static cc_result MusicConverter_FlushBlock(void) {
+	cc_uint8* dst;
+	int i, lo, hi;
+	if (!conv.blockCount) return 0;
+
+	if (conv.size + ADPCM_BLOCK_ALIGN > conv.capacity) {
+		dst = (cc_uint8*)Mem_TryRealloc(conv.data, conv.capacity + 64 * ADPCM_BLOCK_ALIGN, 1);
+		if (!dst) return ERR_OUT_OF_MEMORY;
+
+		conv.data      = dst;
+		conv.capacity += 64 * ADPCM_BLOCK_ALIGN;
+	}
+	dst = conv.data + conv.size;
+
+	/* Each block starts with its first sample and the step index */
+	conv.state.predictor = conv.block[0];
+	Mem_WriteU16_LE(dst, (cc_uint16)conv.block[0]);
+	dst[2] = conv.state.index;
+	dst[3] = 0;
+	dst   += 4;
+
+	for (i = 1; i < conv.blockCount; i += 2)
+	{
+		lo = Adpcm_EncodeSample(&conv.state, conv.block[i]);
+		hi = i + 1 < conv.blockCount ? Adpcm_EncodeSample(&conv.state, conv.block[i + 1]) : 0;
+		*dst++ = lo | (hi << 4);
+	}
+
+	conv.size     = (cc_uint32)(dst - conv.data);
+	conv.samples += conv.blockCount;
+	conv.blockCount = 0;
+	return 0;
+}
+
+/* Downmixes to mono and averages samples down to the output sample rate */
+static cc_result MusicConverter_ConvertFrame(void) {
+	int channels = conv.vorbis->channels;
+	int i, j, count;
+	cc_result res;
+
+	count = Vorbis_OutputFrame(conv.vorbis, conv.frame);
+	for (i = 0; i < count; i += channels)
+	{
+		for (j = 0; j < channels; j++) conv.accum += conv.frame[i + j];
+		conv.accumCount += channels;
+
+		conv.phase += conv.outRate;
+		if (conv.phase < conv.inRate) continue;
+		conv.phase -= conv.inRate;
+
+		conv.block[conv.blockCount++] = conv.accum / conv.accumCount;
+		conv.accum = 0; conv.accumCount = 0;
+
+		if (conv.blockCount < ADPCM_BLOCK_SAMPLES) continue;
+		if ((res = MusicConverter_FlushBlock())) return res;
+	}
+	return 0;
+}
+
+/* Converts audio for a short amount of time, returning ERR_END_OF_STREAM once all audio is converted */
+static cc_result MusicConverter_Step(void) {
+	cc_uint64 beg = Stopwatch_Measure();
+	cc_result res;
+
+	do {
+		if ((res = Vorbis_DecodeFrame(conv.vorbis)))  return res;
+		if ((res = MusicConverter_ConvertFrame()))    return res;
+	} while (Stopwatch_ElapsedMS(beg, Stopwatch_Measure()) < 30);
+	return 0;
+}
+
+static void MusicConverter_WriteHeader(void) {
+	cc_uint8* hdr = conv.data;
+	cc_uint32 byteRate = (cc_uint32)((cc_uint64)conv.outRate * ADPCM_BLOCK_ALIGN / ADPCM_BLOCK_SAMPLES);
+
+	Mem_WriteU32_BE(hdr +  0, WAV_FourCC('R','I','F','F'));
+	Mem_WriteU32_LE(hdr +  4, conv.size - 8);
+	Mem_WriteU32_BE(hdr +  8, WAV_FourCC('W','A','V','E'));
+
+	Mem_WriteU32_BE(hdr + 12, WAV_FourCC('f','m','t',' '));
+	Mem_WriteU32_LE(hdr + 16, 20);   /* fmt chunk size */
+	Mem_WriteU16_LE(hdr + 20, 0x11); /* IMA ADPCM audio format */
+	Mem_WriteU16_LE(hdr + 22, 1);    /* channels */
+	Mem_WriteU32_LE(hdr + 24, conv.outRate);
+	Mem_WriteU32_LE(hdr + 28, byteRate);
+	Mem_WriteU16_LE(hdr + 32, ADPCM_BLOCK_ALIGN);
+	Mem_WriteU16_LE(hdr + 34, 4);    /* bits per sample */
+	Mem_WriteU16_LE(hdr + 36, 2);    /* extra format bytes */
+	Mem_WriteU16_LE(hdr + 38, ADPCM_BLOCK_SAMPLES);
+
+	Mem_WriteU32_BE(hdr + 40, WAV_FourCC('f','a','c','t'));
+	Mem_WriteU32_LE(hdr + 44, 4);
+	Mem_WriteU32_LE(hdr + 48, conv.samples);
+
+	Mem_WriteU32_BE(hdr + 52, WAV_FourCC('d','a','t','a'));
+	Mem_WriteU32_LE(hdr + 56, conv.size - MUSIC_WAV_HDR_SIZE);
+}
+
+static cc_result MusicConverter_Save(void) {
+	cc_string path; char pathBuffer[STRING_SIZE];
+	int freeKB;
+	cc_result res;
+
+	if ((res = MusicConverter_FlushBlock())) return res;
+	/* Pad out last block, as some decoders (e.g. ffmpeg) expect all blocks to be the same size */
+	while ((conv.size - MUSIC_WAV_HDR_SIZE) % ADPCM_BLOCK_ALIGN) conv.data[conv.size++] = 0;
+	MusicConverter_WriteHeader();
+
+	/* Other resources may have been saved while converting */
+	freeKB = Directory_GetFreeSpaceKB();
+	if (freeKB >= 0 && conv.size / 1024 + MUSIC_RESERVE_KB / 2 > (cc_uint32)freeKB) return MUSIC_ERR_NO_SPACE;
+
+	String_InitArray(path, pathBuffer);
+	String_Format1(&path, "audio/%c", conv.music->name);
+	path.length -= 3;
+	String_AppendConst(&path, "wav");
+	return Stream_WriteAllTo(&path, conv.data, conv.size);
+}
+
+static void MusicConverter_End(cc_result res) {
+	cc_string name = String_FromReadonly(conv.music->name);
+	if (res == ERR_END_OF_STREAM) res = MusicConverter_Save();
+
+	if (res == MUSIC_ERR_NO_SPACE) {
+		Platform_Log1("Not enough free space to save %s", &name);
+		if (!music_warnedSpace) {
+			static const cc_string msg = String_FromConst("Not enough free space on the memory card for some of the music");
+			Logger_DialogWarn(&msg);
+		}
+		music_warnedSpace = true;
+	} else if (res) {
+		Logger_SimpleWarn2(res, "converting", &name);
+	} else {
+		conv.music->downloaded = true;
+	}
+
+	MusicConverter_Free();
+	music_next++;
+	MusicAssets_DownloadNext();
+}
+
+static void MusicAssets_CheckStatus(void) {
+	struct HttpRequest item;
+	struct MusicAsset* music;
+	cc_result res;
+
+	if (conv.music) {
+		if ((res = MusicConverter_Step())) MusicConverter_End(res);
+		return;
+	}
+	if (music_next >= Array_Elems(musicAssets)) return;
+	music = &musicAssets[music_next];
+
+	if (!Fetcher_Get(music->reqID, &item)) return;
+	if ((res = MusicConverter_Begin(music, &item))) MusicConverter_End(res);
+}
+
+static void MusicAssets_ResetState(void) {
+	MusicConverter_Free();
+}
+
+const char* Fetcher_GetConverting(int* progress) {
+	cc_uint64 converted;
+	if (!conv.music) return NULL;
+
+	converted = (cc_uint64)(conv.samples + conv.blockCount) * conv.inRate / conv.outRate;
+	*progress = conv.inSamples ? (int)min(100, converted * 100 / conv.inSamples) : 0;
+	return conv.music->name;
+}
+#else
 /*########################################################################################################################*
 *----------------------------------------------------Music asset processing ----------------------------------------------*
 *#########################################################################################################################*/
@@ -402,6 +718,7 @@ static void MusicAssets_CheckStatus(void) {
 
 static void MusicAssets_ResetState(void) {
 }
+#endif
 
 static const struct AssetSet mccMusicAssetSet = {
 	MusicAssets_CheckExistence,
@@ -697,10 +1014,15 @@ static cc_bool ccTexturesExist, ccTexturesDownloaded;
 static int ccTexturesReqID;
 
 static void CCTextures_CheckExistence(void) {
+#ifdef CC_BUILD_BUNDLED_TEXTURES
+	/* Built into the executable */
+	ccTexturesExist = true;
+#else
 	cc_filepath path;
 	Platform_EncodePath(&path, &ccTexPack);
-	
+
 	ccTexturesExist = File_Exists(&path);
+#endif
 }
 
 static void CCTextures_CountMissing(void) {
@@ -1135,8 +1457,10 @@ static void MCCTextures_CheckExistence(void) {
 	/* >= in case somehow have say "gui.png", "GUI.png" */
 	allZipEntriesExist = zipEntriesFound >= Array_Elems(defaultZipEntries);
 
+#ifndef CC_BUILD_BUNDLED_TEXTURES
 	/* Need touch.png from ClassiCube textures */
 	if (!allZipEntriesExist) ccTexturesExist = false;
+#endif
 }
 
 static void MCCTextures_CountMissing(void) {
@@ -1342,7 +1666,16 @@ void Fetcher_Update(void) {
 		asset_sets[i]->CheckStatus();
 	}
 
-	if (Fetcher_Downloaded != Resources_MissingCount) return; 
+#ifdef CC_BUILD_COMPACTMUSIC
+	if (conv.music) return; /* Still converting downloaded music */
+#endif
+	if (Fetcher_Downloaded != Resources_MissingCount) return;
 	Fetcher_Finish();
+}
+
+void Fetcher_Cancel(void) {
+	Http_ClearPending();
+	Fetcher_Working = false;
+	ResetState();
 }
 #endif

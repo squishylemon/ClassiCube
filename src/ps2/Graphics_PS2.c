@@ -1,4 +1,3 @@
-#define CC_DYNAMIC_VBS_ARE_STATIC
 #define CC_SCRATCH_VBS_ARE_DYNAMIC
 #include "../_GraphicsBase.h"
 #include "../Errors.h"
@@ -15,6 +14,8 @@
 #include <draw.h>
 #include <draw3d.h>
 #include <malloc.h>
+#include <unistd.h>
+#include <kernel.h>
 #include "gs_gpu.h"
 
 #define QWORD_ALIGNED CC_ALIGNED(16)
@@ -29,7 +30,7 @@ typedef struct { int x, y, z, w; } VU0_IVector QWORD_ALIGNED;
 static void* gfx_vertices;
 extern framebuffer_t fb_colors[2];
 extern zbuffer_t     fb_depth;
-static VU0_vector vp_origin, vp_scale;
+static VU0_vector vp_origin, vp_scale, clip_scale;
 static cc_bool stateDirty, formatDirty;
 static framebuffer_t* fb_draw;
 static framebuffer_t* fb_display;
@@ -41,9 +42,10 @@ extern void LoadViewportOrigin(VU0_vector* origin);
 extern void LoadViewportScale(VU0_vector* scale);
 
 // TODO ucab memory with dcache flush at start?
-// TODO: Find a better way than just increasing this hardcoded size
-static qword_t  dma_bufs[2][50000] CACHELINE_ALIGNED;
-static qword_t* cur_buf;
+// NOTE: When a buffer fills up, it's flushed mid-frame (see EnsureDMASpace),
+//  so this only needs to be big enough for a worst case batch (MAX_BATCH_QWORDS)
+static qword_t  dma_bufs[2][16384] CACHELINE_ALIGNED;
+static int cur_dma;
 static int cur_context;
 
 static qword_t* dma_beg;
@@ -72,10 +74,12 @@ static void Gfx_FreeState(void) {
 static void UpdateContext(void) {
 	fb_display = &fb_colors[cur_context];
 	fb_draw    = &fb_colors[cur_context ^ 1];
+}
 
-	cur_buf = dma_bufs[cur_context];
-	
-	dma_beg = cur_buf;
+// Commands are written into one DMA buffer while the other is being sent to the GS
+static void SwapDMABuffer(void) {
+	cur_dma ^= 1;
+	dma_beg  = dma_bufs[cur_dma];
 	// increment past the dmatag itself
 	Q = dma_beg + 1;
 }
@@ -110,8 +114,9 @@ static void UpdateContext(void) {
 *----------------------------------------------------Misc GS primitives---------------------------------------------------*
 *#########################################################################################################################*/
 #define REGLIST_XYZ_XYZ      (u64)((GIF_REG_XYZ2  << 0) | (GIF_REG_XYZ2 << 4))
-#define REGLIST_RGBAQ_XYZ    (u64)((GIF_REG_RGBAQ << 0) | (GIF_REG_XYZ2 << 4))
-#define REGLIST_RGBAQ_ST_XYZ (u64)((GIF_REG_RGBAQ << 0) | (GIF_REG_ST   << 4) | (GIF_REG_XYZ2 << 8))
+// NOTE: XYZF2 is used so that per-vertex fog values can be specified
+#define REGLIST_RGBAQ_XYZ    (u64)((GIF_REG_RGBAQ << 0) | (GIF_REG_XYZF2 << 4))
+#define REGLIST_RGBAQ_ST_XYZ (u64)((GIF_REG_RGBAQ << 0) | (GIF_REG_ST    << 4) | (GIF_REG_XYZF2 << 8))
 
 static qword_t* GS_SetDepthBuffer(qword_t* q, zbuffer_t* zb, unsigned skipMask) {
 	PACK_SIMPLE_HDR(q, 1, true)
@@ -222,7 +227,6 @@ static void InitGuardband(void) {
 	// - -W < X * (SCR_HWIDTH/GB_HALF) < W
 	// Clipping against guardband instead of view frustum reduces the
 	//   number of triangles that go through the slower 'clipping' codepath
-	VU0_vector clip_scale;
 	clip_scale.x = Game.Width  / 2047.0f;
 	clip_scale.y = Game.Height / 2047.0f;
 	clip_scale.z = 1.0f;
@@ -245,22 +249,72 @@ static void InitDrawingEnv(void) {
 
 static void InitPalette(void);
 static void InitTextureMem(void);
+static void UpdateFog(void);
 
 static void InitGPUState(void) {
 	InitPalette();
 	InitTextureMem();
 }
 
+
+/*########################################################################################################################*
+*---------------------------------------------------------Presenting------------------------------------------------------*
+*#########################################################################################################################*/
+// With vsync, finished frames are displayed from the vblank interrupt, instead of the
+//  EE waiting for the GS to finish drawing and then for vblank before starting the next frame.
+// This lets the EE work on the next frame while the GS is still drawing the current one
+static volatile int flip_pending = -1; // index into fb_colors of frame waiting to be displayed
+static int vsync_handler = -1;
+
+static void DisplayFramebuffer(framebuffer_t* fb) {
+	graph_set_framebuffer_filtered(fb->address, fb->width, fb->psm, 0, 0);
+}
+
+static int VSyncHandler(int cause) {
+	// Only display the frame once GS has finished drawing all of it
+	if (flip_pending >= 0 && (GS_CSR & GS_CSR_FINISH)) {
+		GS_CSR = GS_CSR_FINISH; // reset 'finish signalled' flag
+		DisplayFramebuffer(&fb_colors[flip_pending]);
+		flip_pending = -1;
+	}
+
+	ExitHandler();
+	return 0;
+}
+
+static void WaitForPendingFlip(void) {
+	if (flip_pending < 0) return;
+	cc_uint64 beg = Stopwatch_Measure();
+
+	while (flip_pending >= 0)
+	{
+		if (Stopwatch_ElapsedMS(beg, Stopwatch_Measure()) < 200) continue;
+
+		// Should never happen, but avoid hanging forever if vblank interrupt is missed
+		DI();
+		if (flip_pending >= 0) {
+			GS_wait_draw_finish();
+			DisplayFramebuffer(&fb_colors[flip_pending]);
+			flip_pending = -1;
+		}
+		EI();
+	}
+}
+
 void Gfx_Create(void) {
 	if (!Gfx.Created) InitGPUState();
+	if (vsync_handler < 0) vsync_handler = graph_add_vsync_handler(VSyncHandler);
 
 	cur_context = 0;
 	UpdateContext();
-	
+	cur_dma = 1;
+	SwapDMABuffer();
+
 	stateDirty  = true;
 	formatDirty = true;
 	InitDrawingEnv();
 	InitGuardband();
+	UpdateFog();
 	Gfx_OnWindowResize(Game.Width, Game.Height);
 	
 // TODO maybe Min not actually needed?
@@ -275,18 +329,26 @@ void Gfx_Create(void) {
 	Gfx.NonPowTwoTexturesSupport = GFX_NONPOW2_UPLOAD;
 }
 
-void Gfx_Free(void) { 
+void Gfx_Free(void) {
 	Gfx_FreeState();
+	WaitForPendingFlip();
+
+	if (vsync_handler >= 0) graph_remove_vsync_handler(vsync_handler);
+	vsync_handler = -1;
 }
 
+// Starts sending the queued commands to the GS, without waiting for that to complete
 static void FlushMainDMABuffer(void) {
+	// Next frame is drawn into the framebuffer that's still being displayed
+	WaitForPendingFlip();
+	// Previous DMA transfer must complete before starting another one,
+	//  which also means the other DMA buffer is now free to be reused
 	dma_wait_fast();
 
-	if (Q != dma_beg + 1) {
-		DMATAG_END(dma_beg, (Q - dma_beg) - 1, 0, 0, 0);
-		dma_channel_send_chain(DMA_CHANNEL_GIF, dma_beg, Q - dma_beg, 0, 0);
-	}
-	Q = dma_beg + 1;
+	if (Q == dma_beg + 1) return;
+	DMATAG_END(dma_beg, (Q - dma_beg) - 1, 0, 0, 0);
+	dma_channel_send_chain(DMA_CHANNEL_GIF, dma_beg, Q - dma_beg, 0, 0);
+	SwapDMABuffer();
 }
 
 
@@ -419,6 +481,8 @@ void Gfx_TransferPixels(void* src, int width, int height,
 						int format, unsigned dst_base, unsigned dst_stride) {
 	qword_t buf[200] CACHELINE_ALIGNED;
 	qword_t* q = buf;
+	// GS may still be drawing previous frame
+	WaitForPendingFlip();
 
 	q = PrepareTransfer(q, src, width, height, format, dst_base, dst_stride);
 	dma_channel_send_chain(DMA_CHANNEL_GIF, buf, q - buf, 0,0);
@@ -527,14 +591,26 @@ static cc_uint8 tex_4HL_table[TEXMEM_MAX_BLOCKS / BLOCKS_PER_PAGE];
 static cc_uint8 tex_4HH_table[TEXMEM_MAX_BLOCKS / BLOCKS_PER_PAGE];
 static int texmem_4bpp_blocks;
 
-static unsigned tex_offset;
 #define TEXMEM_4BPP_TO_VRAM(block) ((block) * TEXMEM_BLOCK_SIZE)
 
-static void InitTextureMem(void) {
-	tex_offset = Gfx_VRAM_Alloc(256, 256, GS_PSM_32);
+// 32bpp textures are cached in the remaining VRAM, using whole GS pages
+//  (since partial pages aren't contiguous in memory due to GS swizzling)
+#define VRAM_PAGE_WORDS 2048
+#define TEX32_MAX_PAGES (VRAM_SIZE_WORDS / VRAM_PAGE_WORDS)
+static cc_uint8 tex32_table[TEX32_MAX_PAGES / BLOCKS_PER_PAGE];
+static int tex32_base_page, tex32_num_pages;
+#define TEX32_TO_VRAM(page) ((tex32_base_page + (page)) * VRAM_PAGE_WORDS)
 
+static void InitTextureMem(void) {
 	// Overlap 4bpp textures with the two 24bpp framebuffers
 	texmem_4bpp_blocks = fb_depth.address / TEXMEM_BLOCK_SIZE;
+
+	// All remaining VRAM is used for caching 32bpp textures
+	int beg = CC_ALIGNUP(vram_pointer, VRAM_PAGE_WORDS);
+	tex32_base_page = beg / VRAM_PAGE_WORDS;
+	tex32_num_pages = (VRAM_SIZE_WORDS - beg) / VRAM_PAGE_WORDS;
+	vram_pointer    = VRAM_SIZE_WORDS;
+	Platform_Log1("VRAM pages for 32bpp textures: %i", &tex32_num_pages);
 }
 
 
@@ -543,16 +619,19 @@ static void InitTextureMem(void) {
 *#########################################################################################################################*/
 struct GPUTexture {
 	cc_uint16 width, height;     // 4 bytes
-	cc_uint16 base, blocks;      // 4 bytes
+	cc_uint16 base, blocks;      // 4 bytes (4bpp: VRAM blocks, 32bpp: VRAM pages)
 	cc_uint16 log2_w, log2_h;    // 4 bytes
 	cc_uint16 format, pal_index; // 4 bytes
+	cc_uint32 last_used;         // 4 bytes
+	cc_uint8  resident, dirty;   // 2 bytes (32bpp: whether in VRAM, whether VRAM copy is stale)
+	cc_uint8  padding[10];       // keeps pixels aligned to 16 bytes
 	BitmapCol palette[MAX_PAL_4BPP_ENTRIES];
 	BitmapCol pixels[]; // must be aligned to 16 bytes
 };
 #define GS_TEXTURE_STRIDE(tex) CC_ALIGNUP((tex)->width, 64)
 
 static void UploadToVRAM(struct GPUTexture* tex, int dst_addr) {
-	// TODO terrible perf
+	// Must flush queued draws first, since they may use the VRAM being overwritten
 	FlushMainDMABuffer();
 	dma_wait_fast();
 
@@ -586,12 +665,88 @@ static void ConvertTexture_Palette(cc_uint8* dst, struct Bitmap* bmp, int rowWid
 static int Log2Dimension(int len) { return Math_ilog2(Math_NextPowOf2(len)); }
 
 static void GPUTexture_Init(struct GPUTexture* tex, struct Bitmap* bmp) {
-	tex->width  = bmp->width;
-	tex->height = bmp->height;
-	tex->log2_w = Log2Dimension(bmp->width);
-	tex->log2_h = Log2Dimension(bmp->height);
+	tex->width     = bmp->width;
+	tex->height    = bmp->height;
+	tex->log2_w    = Log2Dimension(bmp->width);
+	tex->log2_h    = Log2Dimension(bmp->height);
+	tex->last_used = 0;
+	tex->resident  = false;
+	tex->dirty     = true;
 }
 
+
+/*########################################################################################################################*
+*---------------------------------------------------32bpp texture cache---------------------------------------------------*
+*#########################################################################################################################*/
+#define MAX_RESIDENT_TEXTURES 128
+static struct GPUTexture* resident_texs[MAX_RESIDENT_TEXTURES];
+static int num_resident;
+static cc_uint32 bind_counter;
+
+static int Tex32_PagesNeeded(struct GPUTexture* tex) {
+	int size = VRAM_Size(tex->width, CC_ALIGNUP(tex->height, 32), GS_PSM_32);
+	return SIZE_TO_BLOCKS(size, VRAM_PAGE_WORDS);
+}
+
+static void Tex32_Evict(int i) {
+	struct GPUTexture* tex = resident_texs[i];
+	blockalloc_dealloc(tex32_table, tex->base, tex->blocks);
+	tex->resident = false;
+
+	resident_texs[i] = resident_texs[--num_resident];
+}
+
+static void Tex32_EvictLRU(void) {
+	int lru = 0;
+	for (int i = 1; i < num_resident; i++)
+	{
+		if (resident_texs[i]->last_used < resident_texs[lru]->last_used) lru = i;
+	}
+	Tex32_Evict(lru);
+}
+
+static cc_bool Tex32_MakeResident(struct GPUTexture* tex) {
+	int pages = Tex32_PagesNeeded(tex), base;
+	if (pages > tex32_num_pages) return false;
+	if (num_resident == MAX_RESIDENT_TEXTURES) Tex32_EvictLRU();
+
+	// Evict least recently used textures until there is enough contiguous space
+	while ((base = blockalloc_alloc(tex32_table, tex32_num_pages, pages)) < 0)
+	{
+		Tex32_EvictLRU();
+	}
+
+	tex->base     = base;
+	tex->blocks   = pages;
+	tex->resident = true;
+	tex->dirty    = true;
+	resident_texs[num_resident++] = tex;
+	return true;
+}
+
+static void Tex32_Delete(struct GPUTexture* tex) {
+	for (int i = 0; i < num_resident; i++)
+	{
+		if (resident_texs[i] == tex) { Tex32_Evict(i); return; }
+	}
+}
+
+static GfxResourceID AllocTexture32(struct Bitmap* bmp, int rowWidth) {
+	struct GPUTexture* tex = memalign(16, sizeof(struct GPUTexture) + bmp->width * bmp->height * 4);
+	if (!tex) return 0;
+	GPUTexture_Init(tex, bmp);
+
+	tex->format = GS_PSM_32;
+	CopyPixels(tex->pixels, bmp->width * BITMAPCOLOR_SIZE,
+			   bmp->scan0,  rowWidth * BITMAPCOLOR_SIZE,
+			   bmp->width,  bmp->height);
+	return tex;
+}
+
+
+/*########################################################################################################################*
+*---------------------------------------------------------Textures--------------------------------------------------------*
+*#########################################################################################################################*/
 GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags, cc_bool mipmaps) {
 	BitmapCol palette[MAX_PAL_4BPP_ENTRIES] QWORD_ALIGNED;
 	int pal_count = 0;
@@ -600,7 +755,7 @@ GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags,
 		pal_count = CalcPalette(palette, bmp, rowWidth);
 	}
 	//Platform_Log4("%i, c%i (%i x %i)", &pal_index, &pal_count, &bmp->width, &bmp->height);
-	
+
 	if (pal_count > 0) {
 		struct GPUTexture* tex = memalign(16, sizeof(struct GPUTexture) + bmp->width * bmp->height);
 		if (!tex) return 0;
@@ -637,23 +792,11 @@ GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags,
 			UploadToVRAM(tex, TEXMEM_4BPP_TO_VRAM(base));
 			return realloc(tex, sizeof(struct GPUTexture));
 		}
-		return tex;
-	} else {
-		struct GPUTexture* tex = memalign(16, sizeof(struct GPUTexture) + bmp->width * bmp->height * 4);
-		if (!tex) return 0;
-		GPUTexture_Init(tex, bmp);
 
-		tex->format = GS_PSM_32;
-		CopyPixels(tex->pixels, bmp->width * BITMAPCOLOR_SIZE, 
-				   bmp->scan0,  rowWidth * BITMAPCOLOR_SIZE,
-				   bmp->width,  bmp->height);
-
-		//int size    = VRAM_Size(1 << tex->log2_w, max(32, 1 << tex->log2_h), GS_PSM_4HH);		
-		// TODO fix properly. alignup instead
-		//int blocks  = SIZE_TO_BLOCKS(size, TEXMEM_BLOCK_SIZE); size = blocks / (2048 / 64);
-		//Platform_Log4("32BPP: b %i / p %i (%i X %i)", &size, &blocks, &bmp->width, &bmp->height);
-		return tex;
+		// No room left in upper bits of framebuffers, so fallback to 32bpp texture
+		Mem_Free(tex);
 	}
+	return AllocTexture32(bmp, rowWidth);
 }
 
 static unsigned clut_counter;
@@ -678,24 +821,34 @@ static qword_t* UpdateTextureBuffer(qword_t* q, struct GPUTexture* tex, unsigned
 void Gfx_BindTexture(GfxResourceID texId) {
 	if (!texId) texId = white_square;
 	struct GPUTexture* tex = (struct GPUTexture*)texId;
-	
-	int dst_addr = tex_offset;
-	
-	if (tex->format == GS_PSM_4HH || tex->format == GS_PSM_4HL) {
-		// No need to upload whole texture to vram
-		dst_addr = TEXMEM_4BPP_TO_VRAM(tex->base);
+	int dst_addr;
+	tex->last_used = ++bind_counter;
 
+	if (tex->format == GS_PSM_4HH || tex->format == GS_PSM_4HL) {
+		// 4bpp textures always stay entirely in VRAM
+		dst_addr = TEXMEM_4BPP_TO_VRAM(tex->base);
 		Q = UploadPalette(Q, tex->palette);
 	} else {
-		UploadToVRAM(tex, dst_addr);
+		// Texture too large to ever fit in VRAM
+		if (!tex->resident && !Tex32_MakeResident(tex)) return;
+		dst_addr = TEX32_TO_VRAM(tex->base);
+
+		// Only reupload when texture contents have changed
+		if (tex->dirty) {
+			UploadToVRAM(tex, dst_addr);
+			tex->dirty = false;
+		}
 	}
 	Q = UpdateTextureBuffer(Q, tex, dst_addr);
 }
-		
+
 void Gfx_DeleteTexture(GfxResourceID* texId) {
 	struct GPUTexture* tex = (struct GPUTexture*)(*texId);
 	if (!tex) return;
 
+	if (tex->format == GS_PSM_32 && tex->resident) {
+		Tex32_Delete(tex);
+	}
 	if (tex->format == GS_PSM_4HH) {
 		blockalloc_dealloc(tex_4HH_table, tex->base, tex->blocks);
 	}
@@ -710,10 +863,13 @@ void Gfx_DeleteTexture(GfxResourceID* texId) {
 void Gfx_UpdateTexture(GfxResourceID texId, int x, int y, struct Bitmap* part, int rowWidth, cc_bool mipmaps) {
 	struct GPUTexture* tex = (struct GPUTexture*)texId;
 	BitmapCol* dst = (tex->pixels + x) + y * tex->width;
+	// 4bpp textures don't keep their pixels around after being uploaded
+	if (tex->format != GS_PSM_32) return;
 
-	CopyPixels(dst,        tex->width * BITMAPCOLOR_SIZE, 
+	CopyPixels(dst,        tex->width * BITMAPCOLOR_SIZE,
 			  part->scan0, rowWidth   * BITMAPCOLOR_SIZE,
 			  part->width, part->height);
+	tex->dirty = true;
 }
 
 void Gfx_EnableMipmaps(void)  { }
@@ -725,11 +881,49 @@ void Gfx_DisableMipmaps(void) { }
 *#########################################################################################################################*/
 static int clearR, clearG, clearB;
 
-void Gfx_SetFog(cc_bool enabled)         { }
-static void SetFogColor(PackedCol color) { } // TODO PACK_GIFTAG(q, GS_SET_FOGCOL(0,0,0), GS_REG_FOGCOL);
-static void SetFogDensity(float value)   { }
-static void SetFogEnd(float value)       { }
-static void SetFogMode(FogFunc func)     { }
+// GS fog is calculated per vertex as F = 0 (fully fogged) to 255 (no fog)
+// Calculated in vertex transform as F = clamp(fog_scale * W + fog_bias, 0, 255)
+static VU0_vector fog_factors[3]; // scale, bias, max
+static float fog_scale, fog_bias;
+extern void LoadFogFactors(VU0_vector* factors);
+
+void Gfx_SetFog(cc_bool enabled) {
+	gfx_fogEnabled = enabled;
+	formatDirty    = true;
+}
+
+static void SetFogColor(PackedCol color) {
+	PACK_SIMPLE_HDR(Q, 1, true)
+	{
+		PACK_GIFTAG(Q, GS_SET_FOGCOL(PackedCol_R(color), PackedCol_G(color), PackedCol_B(color)), GS_REG_FOGCOL); Q++;
+	}
+}
+
+static void UpdateFog(void) {
+	float end;
+
+	if (gfx_fogMode == FOG_EXP) {
+		// Approximate exponential fog with linear fog (see algorithm in EnvRenderer.c)
+		#define LOG_005 -2.99573227355399f
+		end = LOG_005 / -gfx_fogDensity;
+	} else {
+		end = gfx_fogEnd;
+	}
+	if (end <= 0.0f) end = 1.0f;
+
+	// Linear fog from 0 to end: F = 255 * (end - W) / end = 255 - W * (255 / end)
+	fog_scale = -255.0f / end;
+	fog_bias  =  255.0f;
+
+	fog_factors[0].x = fog_factors[0].y = fog_factors[0].z = fog_factors[0].w = fog_scale;
+	fog_factors[1].x = fog_factors[1].y = fog_factors[1].z = fog_factors[1].w = fog_bias;
+	fog_factors[2].x = 255.0f;
+	LoadFogFactors(fog_factors);
+}
+
+static void SetFogDensity(float value) { UpdateFog(); }
+static void SetFogEnd(float value)     { UpdateFog(); }
+static void SetFogMode(FogFunc func)   { UpdateFog(); }
 
 static qword_t* UpdateState(qword_t* q) {
 	// TODO: toggle Enable instead of method ?
@@ -752,7 +946,7 @@ static qword_t* UpdateFormat(qword_t* q) {
 	
 	PACK_SIMPLE_HDR(q, 1, true)
 	{
-		PACK_GIFTAG(q, GS_SET_PRMODE(PRIM_SHADE_GOURAUD, texturing, DRAW_DISABLE,
+		PACK_GIFTAG(q, GS_SET_PRMODE(PRIM_SHADE_GOURAUD, texturing, gfx_fogEnabled,
 								  gfx_alphaBlend, DRAW_DISABLE, PRIM_MAP_ST,
 								  DRAWCTX_0, PRIM_UNFIXED), GS_REG_PRMODE);	q++;
 	}
@@ -760,8 +954,14 @@ static qword_t* UpdateFormat(qword_t* q) {
 	return q;
 }
 
+// Read by DrawTexturedQuad/DrawColouredQuad. 0 = no culling,
+//  otherwise sign bit = sign of screen space winding to cull
+int gfx_cullMask;
+// NOTE: Viewport transform flips Y, so front faces end up with clockwise winding
+#define CULL_MASK_BACKFACES 0x00000001
+
 void Gfx_SetFaceCulling(cc_bool enabled) {
-	// TODO
+	gfx_cullMask = enabled ? CULL_MASK_BACKFACES : 0;
 }
 
 static void SetAlphaTest(cc_bool enabled) {
@@ -914,12 +1114,45 @@ static void PreprocessColouredVertices(void* vertices) {
     }
 }
 
-static GfxResourceID Gfx_AllocStaticVb(VertexFormat fmt, int count) {
-	//return Mem_TryAlloc(count, strideSizes[fmt]);
-	return memalign(16, count * strideSizes[fmt]);
-	// align to 16 bytes, so DrawTexturedQuad/DrawColouredQuad can
-	//  load vertices using the "load quad (16 bytes)" instruction
+// Chunk meshes on large maps can easily use up all of the remaining RAM, which would then
+//  cause the game to abort when it next needs to allocate memory (e.g. for a bitmap).
+// So instead refuse to allocate static vertex buffers that would leave less than this amount
+//  of RAM free, which makes the game reduce view distance (see Game_ReduceVRAM) instead
+#define VB_RAM_RESERVE (1536 * 1024)
+
+static cc_bool HasFreeRAM(int size) {
+	struct mallinfo info = mallinfo();
+	// Free memory = never allocated memory above heap break + freed chunks within heap
+	int avail = (int)((char*)EndOfHeap() - (char*)sbrk(0)) + info.fordblks;
+	return avail - size >= VB_RAM_RESERVE;
 }
+
+// align to 16 bytes, so DrawTexturedQuad/DrawColouredQuad can
+//  load vertices using the "load quad (16 bytes)" instruction
+static GfxResourceID AllocVertices(VertexFormat fmt, int count) {
+	return memalign(16, count * strideSizes[fmt]);
+}
+
+static GfxResourceID Gfx_AllocStaticVb(VertexFormat fmt, int count) {
+	if (!HasFreeRAM(count * strideSizes[fmt])) return NULL;
+	return AllocVertices(fmt, count);
+}
+
+// Dynamic vertex buffers are small (e.g. entity models, text), and the game aborts
+//  if they can't be allocated, so they ignore the RAM reserve above
+static GfxResourceID Gfx_AllocDynamicVb(VertexFormat fmt, int maxVertices) {
+	return AllocVertices(fmt, maxVertices);
+}
+
+void Gfx_BindDynamicVb(GfxResourceID vb) { Gfx_BindVb(vb); }
+
+void* Gfx_LockDynamicVb(GfxResourceID vb, VertexFormat fmt, int count) {
+	return Gfx_LockVb(vb, fmt, count);
+}
+
+void Gfx_UnlockDynamicVb(GfxResourceID vb)  { Gfx_UnlockVb(vb); Gfx_BindVb(vb); }
+
+void Gfx_DeleteDynamicVb(GfxResourceID* vb) { Gfx_DeleteVb(vb); }
 
 void Gfx_BindVb(GfxResourceID vb) { gfx_vertices = vb; }
 
@@ -965,12 +1198,17 @@ void Gfx_LoadMVP(const struct Matrix* view, const struct Matrix* proj, struct Ma
 	Matrix_Mul(mvp, view, proj);
 }
 
+static cc_bool texOffset;
+static float texOffsetX, texOffsetY;
+
 void Gfx_EnableTextureOffset(float x, float y) {
-	// TODO
+	texOffset  = true;
+	texOffsetX = x;
+	texOffsetY = y;
 }
 
 void Gfx_DisableTextureOffset(void) {
-	// TODO
+	texOffset = false;
 }
 
 void Gfx_CalcOrthoMatrix(struct Matrix* matrix, float width, float height, float zNear, float zFar) {
@@ -989,6 +1227,12 @@ void Gfx_CalcOrthoMatrix(struct Matrix* matrix, float width, float height, float
 
 static float Cotangent(float x) { return Math_CosF(x) / Math_SinF(x); }
 void Gfx_CalcPerspectiveMatrix(struct Matrix* matrix, float fov, float aspect, float zFar) {
+	// Chunks are drawn if their centre is within roughly view distance + 24 blocks of the centre of the
+	//  camera's chunk, so parts of them can be up to ~52 blocks beyond the far plane. Quads crossing the
+	//  far plane need slow clipping in C instead of the fast VU0 path, so push far plane out past
+	//  the furthest chunk instead. (beyond view distance is entirely fogged anyway)
+	zFar += 64.0f;
+
 	// Swap zNear/zFar since PS2 only supports GREATER or GEQUAL depth comparison modes
 	float zNear_ = zFar;
 	float zFar_  = 0.1f;
@@ -1033,9 +1277,200 @@ void Gfx_SetVertexFormat(VertexFormat fmt) {
 	formatDirty = true;
 }
 
+// Returns NULL if any vertex of the quad needs clipping
 extern u64* DrawTexturedQuad(void* src, u64* dst, VU0_vector* tmp);
 extern u64* DrawColouredQuad(void* src, u64* dst, VU0_vector* tmp);
 
+
+/*########################################################################################################################*
+*---------------------------------------------------------Clipping--------------------------------------------------------*
+*#########################################################################################################################*/
+// Quads that cross the near/far plane or the guardband are clipped here
+//  (slower, but only needed for a small number of quads)
+struct ClipVertex { float x, y, z, w, u, v, c[4]; };
+#define MAX_CLIP_VERTICES 16
+#define NUM_CLIP_PLANES 7
+
+// Signed distance from the given clipping plane (inside if >= 0)
+static CC_INLINE float ClipDistance(const struct ClipVertex* v, int plane) {
+	switch (plane)
+	{
+		case 0: return v->w - v->x * clip_scale.x;
+		case 1: return v->w + v->x * clip_scale.x;
+		case 2: return v->w - v->y * clip_scale.y;
+		case 3: return v->w + v->y * clip_scale.y;
+		case 4: return v->w - v->z;
+		case 5: return v->w + v->z;
+	}
+	return v->w - 0.00001f; // avoid dividing by zero W
+}
+
+static int ClipOutcode(const struct ClipVertex* v) {
+	int code = 0;
+	for (int p = 0; p < NUM_CLIP_PLANES; p++)
+	{
+		if (ClipDistance(v, p) < 0.0f) code |= 1 << p;
+	}
+	return code;
+}
+
+static void ClipLerp(struct ClipVertex* dst, const struct ClipVertex* a, const struct ClipVertex* b, float t) {
+	dst->x = a->x + (b->x - a->x) * t;
+	dst->y = a->y + (b->y - a->y) * t;
+	dst->z = a->z + (b->z - a->z) * t;
+	dst->w = a->w + (b->w - a->w) * t;
+	dst->u = a->u + (b->u - a->u) * t;
+	dst->v = a->v + (b->v - a->v) * t;
+
+	for (int i = 0; i < 4; i++)
+		dst->c[i] = a->c[i] + (b->c[i] - a->c[i]) * t;
+}
+
+// Sutherland-Hodgman clipping of polygon against a single plane
+static int ClipPolygon(struct ClipVertex* dst, const struct ClipVertex* src, int count, int plane) {
+	int n = 0;
+
+	for (int i = 0; i < count; i++)
+	{
+		const struct ClipVertex* cur = &src[i];
+		const struct ClipVertex* nxt = &src[(i + 1) % count];
+		float dCur = ClipDistance(cur, plane);
+		float dNxt = ClipDistance(nxt, plane);
+
+		if (dCur >= 0.0f) dst[n++] = *cur;
+		if ((dCur >= 0.0f) != (dNxt >= 0.0f)) {
+			ClipLerp(&dst[n++], cur, nxt, dCur / (dCur - dNxt));
+		}
+	}
+	return n;
+}
+
+static void ClipTransform(struct ClipVertex* dst, float x, float y, float z, PackedCol col) {
+	dst->x = x * mvp.row1.x + y * mvp.row2.x + z * mvp.row3.x + mvp.row4.x;
+	dst->y = x * mvp.row1.y + y * mvp.row2.y + z * mvp.row3.y + mvp.row4.y;
+	dst->z = x * mvp.row1.z + y * mvp.row2.z + z * mvp.row3.z + mvp.row4.z;
+	dst->w = x * mvp.row1.w + y * mvp.row2.w + z * mvp.row3.w + mvp.row4.w;
+
+	// NOTE: GS RGBAQ register uses R in lowest byte
+	dst->c[0] = (col >>  0) & 0xFF;
+	dst->c[1] = (col >>  8) & 0xFF;
+	dst->c[2] = (col >> 16) & 0xFF;
+	dst->c[3] = (col >> 24) & 0xFF;
+}
+
+static int ClipQuad(struct ClipVertex* poly) {
+	struct ClipVertex tmp[MAX_CLIP_VERTICES];
+	int codeAnd = ~0, codeOr = 0, count = 4;
+
+	for (int i = 0; i < 4; i++)
+	{
+		int code = ClipOutcode(&poly[i]);
+		codeAnd &= code; codeOr |= code;
+	}
+	if (codeAnd) return 0; // entirely outside a plane
+
+	for (int p = 0; p < NUM_CLIP_PLANES && count >= 3; p++)
+	{
+		if (!(codeOr & (1 << p))) continue;
+
+		count = ClipPolygon(tmp, poly, count, p);
+		Mem_Copy(poly, tmp, count * sizeof(struct ClipVertex));
+	}
+	return count >= 3 ? count : 0;
+}
+
+struct ScreenVertex { u64 rgbaq, st, xyzf; float sx, sy; };
+
+static void ProjectVertex(struct ScreenVertex* dst, const struct ClipVertex* v) {
+	union IntAndFloat q, s, t;
+	float invW = 1.0f / v->w;
+	q.f = invW; s.f = v->u * invW; t.f = v->v * invW;
+
+	dst->sx = v->x * invW * vp_scale.x + vp_origin.x;
+	dst->sy = v->y * invW * vp_scale.y + vp_origin.y;
+	float sz = v->z * invW * vp_scale.z + vp_origin.z;
+
+	float f = fog_scale * v->w + fog_bias;
+	f = max(0.0f, min(255.0f, f));
+
+	u32 rgba = 0;
+	for (int i = 0; i < 4; i++)
+		rgba |= ((u32)(v->c[i] + 0.5f) & 0xFF) << (i * 8);
+
+	dst->rgbaq = rgba | ((u64)q.u << 32);
+	dst->st    = s.u  | ((u64)t.u << 32);
+	dst->xyzf  = ((u64)((u32)dst->sx & 0xFFFF))     | ((u64)((u32)dst->sy & 0xFFFF) << 16) |
+				 ((u64)((u32)sz & 0xFFFFFF) << 32) | ((u64)(u32)f << 56);
+}
+
+// Returns whether polygon should be culled based on its screen space winding
+static cc_bool CullPolygon(const struct ScreenVertex* verts, int count) {
+	if (!gfx_cullMask) return false;
+	float area = 0.0f;
+
+	// Same sign convention as cross product used in DrawTexturedQuad
+	for (int i = 1; i < count - 1; i++)
+	{
+		float ax = verts[i].sx     - verts[0].sx, ay = verts[i].sy     - verts[0].sy;
+		float bx = verts[i + 1].sx - verts[0].sx, by = verts[i + 1].sy - verts[0].sy;
+		area += ax * by - ay * bx;
+	}
+
+	union IntAndFloat a; a.f = area;
+	return ((int)a.u ^ gfx_cullMask) >= 0;
+}
+
+// Clips then outputs the quad as a triangle fan
+static u64* ClipAndDrawQuad(struct ClipVertex* poly, u64* dw, cc_bool textured) {
+	struct ScreenVertex verts[MAX_CLIP_VERTICES];
+	int count = ClipQuad(poly);
+	if (!count) return dw;
+
+	for (int i = 0; i < count; i++) ProjectVertex(&verts[i], &poly[i]);
+	if (CullPolygon(verts, count)) return dw;
+
+	for (int i = 1; i < count - 1; i++)
+	{
+		int idx[3] = { 0, i, i + 1 };
+		for (int j = 0; j < 3; j++)
+		{
+			struct ScreenVertex* v = &verts[idx[j]];
+			*dw++ = v->rgbaq;
+			if (textured) *dw++ = v->st;
+			*dw++ = v->xyzf;
+		}
+	}
+	return dw;
+}
+
+static u64* ClipTexturedQuad(struct VertexTextured* v, u64* dw) {
+	struct ClipVertex poly[MAX_CLIP_VERTICES];
+
+	for (int i = 0; i < 4; i++, v++)
+	{
+		ClipTransform(&poly[i], v->x, v->y, v->z, v->Col);
+		poly[i].u = v->U;
+		poly[i].v = v->V;
+	}
+	return ClipAndDrawQuad(poly, dw, true);
+}
+
+static u64* ClipColouredQuad(struct VertexColoured* v, u64* dw) {
+	struct ClipVertex poly[MAX_CLIP_VERTICES];
+
+	for (int i = 0; i < 4; i++, v++)
+	{
+		ClipTransform(&poly[i], v->x, v->y, v->z, v->Col);
+		poly[i].u = 0;
+		poly[i].v = 0;
+	}
+	return ClipAndDrawQuad(poly, dw, false);
+}
+
+
+/*########################################################################################################################*
+*-------------------------------------------------------Drawing quads-----------------------------------------------------*
+*#########################################################################################################################*/
 static qword_t* DrawTexturedTriangles(qword_t* q, int verticesCount, int startVertex) {
 	struct VertexTextured* v = (struct VertexTextured*)gfx_vertices + startVertex;
 	qword_t* base = q;
@@ -1044,10 +1479,25 @@ static qword_t* DrawTexturedTriangles(qword_t* q, int verticesCount, int startVe
 	u64* dw  = (u64*)q;
 	u64* beg = dw;
 	VU0_vector tmp[6];
+	struct VertexTextured offsetQuad[4] QWORD_ALIGNED;
 
 	for (int i = 0; i < verticesCount / 4; i++, v += 4)
 	{
-		dw = DrawTexturedQuad(v, dw, tmp);
+		struct VertexTextured* src = v;
+
+		// GS has no texture matrix, so need to manually offset texture coordinates
+		if (texOffset) {
+			Mem_Copy(offsetQuad, v, sizeof(offsetQuad));
+			for (int j = 0; j < 4; j++)
+			{
+				offsetQuad[j].U += texOffsetX;
+				offsetQuad[j].V += texOffsetY;
+			}
+			src = offsetQuad;
+		}
+
+		u64* next = DrawTexturedQuad(src, dw, tmp);
+		dw = next ? next : ClipTexturedQuad(src, dw);
 	}
 
 	unsigned numVerts = (unsigned)(dw - beg) / 3;
@@ -1072,7 +1522,8 @@ static qword_t* DrawColouredTriangles(qword_t* q, int verticesCount, int startVe
 
 	for (int i = 0; i < verticesCount / 4; i++, v += 4)
 	{
-		dw = DrawColouredQuad(v, dw, tmp);
+		u64* next = DrawColouredQuad(v, dw, tmp);
+		dw = next ? next : ClipColouredQuad(v, dw);
 	}
 
 	unsigned numVerts = (unsigned)(dw - beg) / 2;
@@ -1085,19 +1536,29 @@ static qword_t* DrawColouredTriangles(qword_t* q, int verticesCount, int startVe
 	return (qword_t*)dw;
 }
 
+#define DMA_BUFFER_QWORDS Array_Elems(dma_bufs[0])
+// Worst case is every quad being clipped into 9 triangles (27 vertices)
+#define MAX_BATCH_VERTICES 1024
+#define MAX_BATCH_QWORDS   (COUNT_REGLIST_HDR + (MAX_BATCH_VERTICES / 4) * 27 * 3 / 2 + 1)
+
+// Ensures there is enough space in the DMA buffer for the given number of qwords
+static void EnsureDMASpace(int qwords) {
+	// +64 for any other GS state changes that come before end of frame
+	if ((Q - dma_beg) + qwords + 64 < DMA_BUFFER_QWORDS) return;
+
+	// Too much geometry for the DMA buffer, so start sending it
+	//  and carry on in the other DMA buffer while GS is drawing
+	FlushMainDMABuffer();
+}
+
 static void DrawTriangles(int verticesCount, int startVertex) {
 	if (stateDirty)  Q = UpdateState(Q);
 	if (formatDirty) Q = UpdateFormat(Q);
 
-	if ((Q - cur_buf) > 40000) {
-		FlushMainDMABuffer();
-		dma_wait_fast();
-		Platform_LogConst("Too much geometry!!");
-	}
-
 	while (verticesCount)
 	{
-		int count = min(32000, verticesCount);
+		int count = min(MAX_BATCH_VERTICES, verticesCount);
+		EnsureDMASpace(MAX_BATCH_QWORDS);
 
 		if (gfx_format == VERTEX_FORMAT_COLOURED) {
 			Q = DrawColouredTriangles(Q, count, startVertex);
@@ -1108,8 +1569,57 @@ static void DrawTriangles(int verticesCount, int startVertex) {
 	}
 }
 
+// Clips a line to inside the clipping planes, returns false if entirely outside
+static cc_bool ClipLine(struct ClipVertex* a, struct ClipVertex* b) {
+	for (int p = 0; p < NUM_CLIP_PLANES; p++)
+	{
+		float dA = ClipDistance(a, p), dB = ClipDistance(b, p);
+		if (dA < 0.0f && dB < 0.0f) return false;
+
+		if (dA < 0.0f) ClipLerp(a, a, b, dA / (dA - dB));
+		if (dB < 0.0f) ClipLerp(b, b, a, dB / (dB - dA));
+	}
+	return true;
+}
+
 void Gfx_DrawVb_Lines(int verticesCount) {
-} /* TODO */
+	struct VertexColoured* v = (struct VertexColoured*)gfx_vertices;
+	if (stateDirty)  Q = UpdateState(Q);
+	if (formatDirty) Q = UpdateFormat(Q);
+
+	Q = GS_SetPrimMode(Q, PRIM_LINE);
+	while (verticesCount >= 2)
+	{
+		int count = min(MAX_BATCH_VERTICES, verticesCount) & ~1;
+		EnsureDMASpace(COUNT_REGLIST_HDR + count + 1);
+
+		qword_t* base = Q;
+		u64* dw  = (u64*)(Q + COUNT_REGLIST_HDR);
+		u64* beg = dw;
+
+		for (int i = 0; i < count; i += 2, v += 2)
+		{
+			struct ClipVertex a, b;
+			struct ScreenVertex sa, sb;
+			ClipTransform(&a, v[0].x, v[0].y, v[0].z, v[0].Col);
+			ClipTransform(&b, v[1].x, v[1].y, v[1].z, v[1].Col);
+			a.u = a.v = b.u = b.v = 0;
+			if (!ClipLine(&a, &b)) continue;
+
+			ProjectVertex(&sa, &a); ProjectVertex(&sb, &b);
+			*dw++ = sa.rgbaq; *dw++ = sa.xyzf;
+			*dw++ = sb.rgbaq; *dw++ = sb.xyzf;
+		}
+
+		unsigned numVerts = (unsigned)(dw - beg) / 2;
+		if (numVerts) {
+			PACK_REGLIST_HDR(base, numVerts, true, 2, REGLIST_RGBAQ_XYZ)
+			Q = (qword_t*)dw;
+		}
+		verticesCount -= count;
+	}
+	Q = GS_SetPrimMode(Q, PRIM_TRIANGLE);
+}
 
 void Gfx_DrawVb_IndexedTris_Range(int verticesCount, int startVertex, DrawHints hints) {
 	DrawTriangles(verticesCount, startVertex);
@@ -1129,8 +1639,80 @@ void Gfx_DrawIndexedTris_T2fC4b(int verticesCount, int startVertex, DrawHints hi
 /*########################################################################################################################*
 *---------------------------------------------------------Other/Misc------------------------------------------------------*
 *#########################################################################################################################*/
+// Privileged GS/VIF registers needed for reading back VRAM (GS -> EE transfer)
+#define VIF1_STAT    *(volatile u32*)(0x10003C00)
+#define GS_BUSDIR    *(volatile u64*)(0x12001040)
+#define VIF1_STAT_FDR 0x00800000 // FIFO direction: 1 = VIF1 -> EE
+
+#define READBACK_ROWS 32
+static BitmapCol readback_buf[640 * READBACK_ROWS] CACHELINE_ALIGNED;
+
+// See "Local -> Host transmission" in https://psi-rockin.github.io/ps2tek/#gstransfer
+static void ReadbackPixels(framebuffer_t* fb, int y, int width, int height, BitmapCol* dst) {
+	qword_t buf[8] CACHELINE_ALIGNED;
+	qword_t* q = buf;
+	int qwords = (width * height * 4) / 16;
+
+	PACK_SIMPLE_HDR(q, 5, true)
+	{
+		PACK_GIFTAG(q, GS_SET_BITBLTBUF(fb->address >> 6, fb->width >> 6, GS_PSM_32, 0,0,0), GS_REG_BITBLTBUF); q++;
+		PACK_GIFTAG(q, GS_SET_TRXPOS(0,y, 0,0, 0),   GS_REG_TRXPOS); q++;
+		PACK_GIFTAG(q, GS_SET_TRXREG(width, height), GS_REG_TRXREG); q++;
+		PACK_GIFTAG(q, 1, GS_REG_FINISH); q++;
+		PACK_GIFTAG(q, GS_SET_TRXDIR(1),             GS_REG_TRXDIR); q++;
+	}
+
+	dma_channel_send_normal(DMA_CHANNEL_GIF, buf, q - buf, 0, 0);
+	dma_wait_fast();
+	GS_wait_draw_finish();
+
+	// Switch VIF1 FIFO and GS bus to GS -> EE direction, then read the pixels
+	SyncDCache(dst, (u8*)dst + qwords * 16);
+	VIF1_STAT = VIF1_STAT_FDR;
+	GS_BUSDIR = 1;
+
+	// NOTE: Size is in bytes for receive, unlike send which uses qwords
+	dma_channel_receive_normal(DMA_CHANNEL_VIF1, dst, qwords * 16, 0, 0);
+	dma_channel_wait(DMA_CHANNEL_VIF1, 0);
+
+	GS_BUSDIR = 0;
+	VIF1_STAT = 0;
+	InvalidDCache(dst, (u8*)dst + qwords * 16);
+}
+
+struct ReadbackState { framebuffer_t* fb; int bandY; };
+
+static BitmapCol* Readback_GetRow(struct Bitmap* bmp, int y, void* ctx) {
+	struct ReadbackState* state = (struct ReadbackState*)ctx;
+	int bandY = y - (y % READBACK_ROWS);
+
+	if (bandY != state->bandY) {
+		int rows = min(READBACK_ROWS, bmp->height - bandY);
+		ReadbackPixels(state->fb, bandY, bmp->width, rows, readback_buf);
+		state->bandY = bandY;
+	}
+
+	BitmapCol* row = readback_buf + (y - bandY) * bmp->width;
+	// Upper 8 bits of 24bpp framebuffer are used for 4bpp textures
+	for (int x = 0; x < bmp->width; x++) row[x] |= BITMAPCOLOR_A_MASK;
+	return row;
+}
+
 cc_result Gfx_TakeScreenshot(struct Stream* output) {
-	return ERR_NOT_SUPPORTED;
+	struct ReadbackState state;
+	struct Bitmap bmp;
+	if (fb_draw->width > 640) return ERR_NOT_SUPPORTED;
+
+	// Make sure GS has finished rendering everything first
+	Q = GS_DrawFinish(Q);
+	FlushMainDMABuffer();
+	GS_wait_draw_finish();
+
+	state.fb    = fb_draw;
+	state.bandY = -1;
+	bmp.width   = fb_draw->width;
+	bmp.height  = fb_draw->height;
+	return Png_Encode(&bmp, output, Readback_GetRow, false, &state);
 }
 
 cc_bool Gfx_WarnIfNecessary(void) { return false; }
@@ -1141,25 +1723,25 @@ void Gfx_BeginFrame(void) {
 }
 
 void Gfx_EndFrame(void) {
-	//Platform_LogConst("--- EF1 ---");
+	// Make sure 'finish signalled' flag is only set once this frame has been drawn
+	WaitForPendingFlip();
+	GS_CSR = GS_CSR_FINISH;
+
 	Q = GS_DrawFinish(Q);
-	
 	FlushMainDMABuffer();
-	//Platform_LogConst("--- EF2 ---");
-		
-	GS_wait_draw_finish();
-	//Platform_LogConst("--- EF3 ---");
-	if (gfx_vsync) GS_wait_vsync();
-	
-	cur_context ^= 1;
-	UpdateContext();
+
+	if (gfx_vsync && vsync_handler >= 0) {
+		// Displayed by VSyncHandler once GS has finished drawing
+		flip_pending = cur_context ^ 1;
+	} else {
+		GS_wait_draw_finish();
+		DisplayFramebuffer(fb_draw);
+	}
 
 	// Double buffering
+	cur_context ^= 1;
+	UpdateContext();
 	Q = GS_SetFrameBuffer(Q, fb_draw, 0);
-	graph_set_framebuffer_filtered(fb_display->address,
-                                   fb_display->width,
-                                   fb_display->psm, 0, 0);
-	//Platform_LogConst("--- EF4 ---");
 }
 
 void Gfx_SetVSync(cc_bool vsync) {

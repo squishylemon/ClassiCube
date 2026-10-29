@@ -334,8 +334,13 @@ static cc_bool Block_MightCull(BlockID block, BlockID other) {
 		&& (other == BLOCK_LAVA || other == BLOCK_STILL_LAVA))
 		return true;
 
+#ifdef CC_BUILD_FASTLEAVES
+	/* All blocks cull with themselves, even leaves (drawing every face inside trees is too slow) */
+	if (block == other) return true;
+#else
 	/* All blocks (except for say leaves) cull with themselves */
 	if (block == other) return Blocks.Draw[block] != DRAW_TRANSPARENT_THICK;
+#endif
 
 	/* An opaque neighbour (asides from lava) culls this block. */
 	if (Blocks.Draw[other] == DRAW_OPAQUE && !Blocks.IsLiquid[other]) return true;

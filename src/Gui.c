@@ -30,9 +30,25 @@ static GfxResourceID bars_VB;
 /*########################################################################################################################*
 *----------------------------------------------------------Gui------------------------------------------------------------*
 *#########################################################################################################################*/
+#ifdef CC_BUILD_SPLITSCREEN
+static cc_bool gui_inPlayerView;
+#define Gui_IsPlayerScreen(i) (priorities[i] == GUI_PRIORITY_HUD)
+
+int Gui_AreaWidth(void)  { return gui_inPlayerView ? Game_ViewWidth()  : Window_Main.Width;  }
+int Gui_AreaHeight(void) { return gui_inPlayerView ? Game_ViewHeight() : Window_Main.Height; }
+
+static void Gui_LayoutScreen(struct Screen* s, int i) {
+	gui_inPlayerView = i >= 0 && Gui_IsPlayerScreen(i);
+	s->VTABLE->Layout(s);
+	gui_inPlayerView = false;
+}
+#else
+#define Gui_LayoutScreen(s, i) (s)->VTABLE->Layout(s)
+#endif
+
 static CC_NOINLINE int GetWindowScale(void) {
-	float widthScale  = Window_Main.Width  * Window_Main.UIScaleX;
-	float heightScale = Window_Main.Height * Window_Main.UIScaleY;
+	float widthScale  = Gui_AreaWidth()  * Window_Main.UIScaleX;
+	float heightScale = Gui_AreaHeight() * Window_Main.UIScaleY;
 
 	/* Use larger UI scaling on mobile */
 	/* TODO move this DPI scaling elsewhere.,. */
@@ -65,7 +81,7 @@ float Gui_GetChatScale(void) {
 }
 
 float Gui_GetCrosshairScale(void) {
-	float heightScale = Window_Main.Height * Window_Main.UIScaleY;
+	float heightScale = Gui_AreaHeight() * Window_Main.UIScaleY;
 	return Gui_Scale(heightScale) * Gui.RawCrosshairScale;
 }
 
@@ -166,10 +182,10 @@ void Gui_LayoutAll(void) {
 	struct Screen* s;
 	int i;
 
-	for (i = 0; i < Gui.ScreensCount; i++) 
+	for (i = 0; i < Gui.ScreensCount; i++)
 	{
 		s = Gui_Screens[i];
-		s->VTABLE->Layout(s);
+		Gui_LayoutScreen(s, i);
 		s->dirty = true;
 	}
 }
@@ -181,9 +197,15 @@ void Gui_RefreshAll(void) {
 }
 
 void Gui_Refresh(struct Screen* s) {
+	int i;
+	for (i = 0; i < Gui.ScreensCount; i++)
+	{
+		if (Gui_Screens[i] == s) break;
+	}
+
 	s->VTABLE->ContextLost(s);
 	s->VTABLE->ContextRecreated(s);
-	s->VTABLE->Layout(s);
+	Gui_LayoutScreen(s, i < Gui.ScreensCount ? i : -1);
 	s->dirty = true;
 }
 
@@ -211,8 +233,8 @@ static void Gui_AddCore(struct Screen* s, int priority) {
 	s->dirty = true;
 	s->VTABLE->Init(s);
 	s->VTABLE->ContextRecreated(s);
-	s->VTABLE->Layout(s);
-	
+	Gui_LayoutScreen(s, i);
+
 	/* for selecting active button etc */
 	for (i = 0; i < Pointers_Count; i++) 
 	{
@@ -321,9 +343,9 @@ void Gui_ShowPauseMenu(void) {
 #define BARS_VB_COUNT 4 * 2
 static void ShowCinematicBars() {
 	struct VertexColoured* v;
-	int screenWidth  = Window_Main.Width;
-	int screenHeight = Window_Main.Height;
-	PackedCol color;
+	int screenWidth  = Gui_AreaWidth();
+	int screenHeight = Gui_AreaHeight();
+PackedCol color;
 	int count;
 
 	// Ensure bar size is clamped between 0 and 1
@@ -365,7 +387,7 @@ void Gui_RenderGui(float delta) {
 	if (Gui.BarSize > 0) ShowCinematicBars();
 
 	/* Draw back to front so highest priority screen is on top */
-	for (i = Gui.ScreensCount - 1; i >= 0; i--) 
+	for (i = Gui.ScreensCount - 1; i >= 0; i--)
 	{
 		s = Gui_Screens[i];
 		s->VTABLE->Update(s, delta);
@@ -376,6 +398,33 @@ void Gui_RenderGui(float delta) {
 
 	Gfx_3DS_SetRenderScreen(TOP_SCREEN);
 }
+
+#ifdef CC_BUILD_SPLITSCREEN
+static void Gui_RenderScreens(float delta, cc_bool playerScreens) {
+	struct Screen* s;
+	int i;
+
+	for (i = Gui.ScreensCount - 1; i >= 0; i--)
+	{
+		if (Gui_IsPlayerScreen(i) != playerScreens) continue;
+		s = Gui_Screens[i];
+		gui_inPlayerView = playerScreens;
+
+		s->VTABLE->Update(s, delta);
+		/* NOTE: Mesh is rebuilt for each player, as e.g. HUD hotbar differs per player */
+		if (s->dirty || playerScreens) { s->VTABLE->BuildMesh(s); s->dirty = false; }
+		s->VTABLE->Render(s, delta);
+	}
+	gui_inPlayerView = false;
+}
+
+void Gui_RenderPlayerGui(float delta) { Gui_RenderScreens(delta, true); }
+
+void Gui_RenderSharedGui(float delta) {
+	if (Gui.BarSize > 0) ShowCinematicBars();
+	Gui_RenderScreens(delta, false);
+}
+#endif
 
 
 /*########################################################################################################################*
@@ -472,8 +521,8 @@ void Widget_CalcPosition(void* widget) {
 	windowWidth  = (w->flags & WIDGET_FLAG_MAINSCREEN) ? Window_Main.Width  : Window_Alt.Width;
 	windowHeight = (w->flags & WIDGET_FLAG_MAINSCREEN) ? Window_Main.Height : Window_Alt.Height;
 #else
-	windowWidth  = Window_Main.Width;
-	windowHeight = Window_Main.Height;
+	windowWidth  = Gui_AreaWidth();
+	windowHeight = Gui_AreaHeight();
 #endif
 	
 	w->x = Gui_CalcPos(w->horAnchor, w->xOffset, w->width , windowWidth );
