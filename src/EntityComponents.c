@@ -1,4 +1,4 @@
-#include "EntityComponents.h"
+﻿#include "EntityComponents.h"
 #include "String_.h"
 #include "ExtMath.h"
 #include "World.h"
@@ -1082,7 +1082,7 @@ static cc_bool Sounds_CheckSolid(BlockID b) {
 	return false;
 }
 
-static void SoundComp_GetSound(struct LocalPlayer* p) {
+static void SoundsComp_GetSound(struct Entity* e) {
 	struct AABB bounds;
 	Vec3 pos;
 	IVec3 coords;
@@ -1090,7 +1090,7 @@ static void SoundComp_GetSound(struct LocalPlayer* p) {
 	float maxY;
 	cc_uint8 typeUnder, collideUnder;
 
-	Entity_GetBounds(&p->Base, &bounds);
+	Entity_GetBounds(e, &bounds);
 	sounds_type = SOUND_NONE;
 	sounds_anyNonAir = false;
 
@@ -1099,7 +1099,7 @@ static void SoundComp_GetSound(struct LocalPlayer* p) {
 	if (sounds_type != SOUND_NONE) return;
 
 	/* then check block standing on (feet) */
-	pos = p->Base.next.pos; pos.y -= 0.01f;
+	pos = e->next.pos; pos.y -= 0.01f;
 	IVec3_Floor(&coords, &pos);
 	blockUnder = World_SafeGetBlock(coords.x, coords.y, coords.z);
 	maxY = coords.y + Blocks.MaxBB[blockUnder].y;
@@ -1115,7 +1115,8 @@ static void SoundComp_GetSound(struct LocalPlayer* p) {
 	Entity_TouchesAny(&bounds, Sounds_CheckSolid);
 }
 
-static cc_bool SoundComp_ShouldPlay(struct LocalPlayer* p, Vec3 soundPos) {
+static cc_bool SoundsComp_ShouldPlay(struct SoundsComp* comp, Vec3 soundPos) {
+	struct Entity* e = comp->entity;
 	Vec3 delta;
 	float distSq;
 	float oldLegRot, newLegRot;
@@ -1123,26 +1124,32 @@ static cc_bool SoundComp_ShouldPlay(struct LocalPlayer* p, Vec3 soundPos) {
 	Vec3_Sub(&delta, &sounds_lastPos[p->index], &soundPos);
 	distSq = Vec3_LengthSquared(&delta);
 	/* just play every certain block interval when not animating */
-	if (p->Base.Anim.Swing < 0.999f) return distSq > 1.75f * 1.75f;
+	if (e->Anim.Swing < 0.999f) return distSq > 1.75f * 1.75f;
 
 	/* have our legs just crossed over the '0' point? */
 	if (Camera.Active->isThirdPerson) {
-		oldLegRot = Math_CosF(p->Base.Anim.WalkTimeO);
-		newLegRot = Math_CosF(p->Base.Anim.WalkTimeN);
+		oldLegRot = Math_CosF(e->Anim.WalkTimeO);
+		newLegRot = Math_CosF(e->Anim.WalkTimeN);
 	} else {
-		oldLegRot = Math_SinF(p->Base.Anim.WalkTimeO);
-		newLegRot = Math_SinF(p->Base.Anim.WalkTimeN);
+		oldLegRot = Math_SinF(e->Anim.WalkTimeO);
+		newLegRot = Math_SinF(e->Anim.WalkTimeN);
 	}
 	return Math_Sign(oldLegRot) != Math_Sign(newLegRot);
 }
 
-void SoundComp_Tick(struct LocalPlayer* p, cc_bool wasOnGround) {
-	Vec3 soundPos = p->Base.next.pos;
+void SoundsComp_Init(struct SoundsComp* comp, struct Entity* entity) {
+	comp->entity = entity;
+	Vec3_Set(comp->lastPos, -87.1234f, -99.5678f, -100.91237f);
+}
 
-	SoundComp_GetSound(p);
-	if (!sounds_anyNonAir) soundPos = Vec3_BigPos();
+void SoundsComp_Tick(struct SoundsComp* comp, cc_bool wasOnGround) {
+	struct Entity* e = comp->entity;
+	Vec3 pos = e->next.pos;
 
-	if (p->Base.OnGround && (SoundComp_ShouldPlay(p, soundPos) || !wasOnGround)) {
+	SoundsComp_GetSound(e);
+	if (!sounds_anyNonAir) pos = Vec3_BigPos();
+
+	if (e->OnGround && (SoundsComp_ShouldPlay(comp, pos) || !wasOnGround)) {
 		Audio_PlayStepSound(sounds_type);
 		sounds_lastPos[p->index] = soundPos;
 	}
