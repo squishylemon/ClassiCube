@@ -383,6 +383,11 @@ extern const cc_result ReturnCode_SocketDropped;
 /* If the input represents an IP address, then parses the input into a single IP address */
 /* Otherwise, attempts to resolve the input via DNS into one or more IP addresses */
 cc_result Socket_ParseAddress(const cc_string* address, int port, cc_sockaddr* addrs, int* numValidAddrs);
+#ifdef CC_BUILD_CHECKNETWORK
+/* Returns false if there's definitely no network connection (e.g. no network adapter or cable) */
+/* NOTE: Can block for a few seconds while waiting for the network link to come up */
+cc_bool Socket_NetworkAvailable(void);
+#endif
 /* Attempts to produce the string representation of the given socket address */
 cc_bool SockAddr_ToString(const cc_sockaddr* addr, cc_string* dst);
 

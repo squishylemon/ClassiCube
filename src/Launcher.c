@@ -275,7 +275,12 @@ void Launcher_Setup(void) {
 #ifdef CC_BUILD_RESOURCES
 	Resources_CheckExistence();
 
+#ifdef CC_BUILD_CHECKNETWORK
+	/* No point asking to download resources when there's no network to download them with */
+	if (Resources_MissingCount && Socket_NetworkAvailable()) {
+#else
 	if (Resources_MissingCount) {
+#endif
 		CheckResourcesScreen_SetActive();
 	} else {
 		MainScreen_SetActive();

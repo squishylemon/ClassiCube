@@ -603,6 +603,15 @@ static cc_result Networking_EnsureReady(void) {
 	return 0;
 }
 
+cc_bool Socket_NetworkAvailable(void) {
+	if (!net_supported) return false; // no network adapter
+	if (net_ready)      return true;
+
+	// Only wait briefly for the link to come up (i.e. cable plugged in), as also
+	//  waiting for a DHCP lease would delay startup by 5+ seconds
+	return WaitUntilReady(Net_CheckIFLinkStatus, 6) == 0;
+}
+
 // Returns whether a network adapter is available
 static cc_bool Networking_LoadIOPModules(void) {
 	int ret;
