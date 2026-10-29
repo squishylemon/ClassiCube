@@ -68,14 +68,13 @@ int TexturePack_ReqID;
 
 TextureRec Atlas1D_TexRec(TextureLoc texLoc, int uCount, int* index) {
 	TextureRec rec;
-	int y  = Atlas1D_RowId(texLoc);
 	*index = Atlas1D_Index(texLoc);
 
 	/* Adjust coords to be slightly inside - fixes issues with AMD/ATI cards */	
 	rec.u1 = 0.0f; 
-	rec.v1 = y * Atlas1D.InvTileSize;
+	rec.v1 = Atlas1D_TileV(texLoc);
 	rec.u2 = (uCount - 1) + UV2_Scale;
-	rec.v2 = rec.v1       + UV2_Scale * Atlas1D.InvTileSize;
+	rec.v2 = rec.v1       + ATLAS1D_V2_SCALE * Atlas1D.InvTileSize;
 	return rec;
 }
 

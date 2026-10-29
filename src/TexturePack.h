@@ -66,6 +66,18 @@ extern cc_bool TexturePack_DefaultMissing;
 #define Atlas2D_TileY(texLoc) ((texLoc) >> ATLAS2D_SHIFT) /* texLoc / ATLAS2D_TILES_PER_ROW */
 /* Returns the index of the given tile id within a 1D atlas */
 #define Atlas1D_RowId(texLoc) ((texLoc)  & Atlas1D.Mask)  /* texLoc % Atlas1D_TilesPerAtlas */
+
+#ifdef CC_BUILD_N64
+/* The RDP can sample slightly above the top of a tile, which shows a line of the tile above it */
+/*  in the atlas along the top edge of faces, so start a quarter of a texel inside the tile */
+#define ATLAS1D_V_INSET (1.0f / 64)
+#else
+#define ATLAS1D_V_INSET 0.0f
+#endif
+/* Returns the V texture coordinate of the top of the given tile within its 1D atlas */
+#define Atlas1D_TileV(texLoc) ((Atlas1D_RowId(texLoc) + ATLAS1D_V_INSET) * Atlas1D.InvTileSize)
+/* Scale of the height of a tile in V texture coordinates (bottom is slightly inside the tile too) */
+#define ATLAS1D_V2_SCALE (UV2_Scale - ATLAS1D_V_INSET)
 /* Returns the index of the 1D atlas within the array of 1D atlases that contains the given tile id */
 #define Atlas1D_Index(texLoc) ((texLoc) >> Atlas1D.Shift) /* texLoc / Atlas1D_TilesPerAtlas */
 

@@ -2559,8 +2559,8 @@ static void TexIdsOverlay_BuildTerrain(struct TexIdsOverlay* s, struct VertexTex
 			tex.x = xOffset    + Atlas2D_TileX(i) * size;
 			tex.y = s->yOffset + Atlas2D_TileY(i) * size;
 
-			tex.uv.v1 = Atlas1D_RowId(i + baseLoc) * Atlas1D.InvTileSize;
-			tex.uv.v2 = tex.uv.v1      + UV2_Scale * Atlas1D.InvTileSize;
+			tex.uv.v1 = Atlas1D_TileV(i + baseLoc);
+			tex.uv.v2 = tex.uv.v1      + ATLAS1D_V2_SCALE * Atlas1D.InvTileSize;
 			
 			Gfx_Make2DQuad(&tex, PACKEDCOL_WHITE, ptr);
 		}
