@@ -3,7 +3,7 @@ SOURCE_DIR	 	= src/n64
 N64_ROM_TITLE 	= "ClassiCube"
 N64_ROM_RTC 	= true
 TARGET			= ClassiCube-n64
-N64_MKDFS_ROOT	= "misc/n64/files"
+N64_MKDFS_ROOT	= $(BUILD_DIR)/romfs
 SRC_DIRS		= 
 
 CFILES 	:= $(notdir $(wildcard src/*.c)) $(notdir $(wildcard src/n64/*.c))
@@ -30,7 +30,21 @@ include $(N64_INST)/include/n64.mk
 $(TARGET).z64: N64_ROM_TITLE = "ClassiCube"
 $(TARGET).z64: $(BUILD_DIR)/filesystem.dfs
 
-$(BUILD_DIR)/filesystem.dfs: misc/n64/files/default.zip
+# ClassiCube's own textures and sounds, and the free music, are stored in the ROM filesystem
+#  (rather than in the executable, which is loaded entirely into RAM)
+MUSIC_FILES	:= $(wildcard misc/music/*.wav)
+ROMFS_FILES	:= $(N64_MKDFS_ROOT)/cc_textures.zip $(N64_MKDFS_ROOT)/cc_audio.zip \
+			   $(patsubst misc/music/music%.wav,$(N64_MKDFS_ROOT)/music/MUSIC%.WAV,$(MUSIC_FILES))
+
+$(N64_MKDFS_ROOT)/%.zip: misc/%.zip
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(N64_MKDFS_ROOT)/music/MUSIC%.WAV: misc/music/music%.wav
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(BUILD_DIR)/filesystem.dfs: $(ROMFS_FILES)
 
 $(BUILD_DIR)/ClassiCube-n64.elf: $(OBJS)
 

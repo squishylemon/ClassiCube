@@ -1,7 +1,6 @@
 #define CC_NO_UPDATER
 #define CC_NO_DYNLIB
 #define CC_NO_SOCKETS
-#define CC_NO_THREADING
 #define CC_NO_OPEN
 #define CC_NO_CRASHHANDLER
 
@@ -99,6 +98,11 @@ void Platform_EncodePath(cc_filepath* dst, const cc_string* path) {
 	char* str = dst->buffer;
 	cc_string path_ = *path;
 
+	// Paths that already start with a device (e.g. "rom:/") aren't relative to the root directory
+	if (String_IndexOf(path, ':') >= 0) {
+		String_EncodeUtf8(str, &path_); return;
+	}
+
 	if (Platform_ReadonlyFilesystem) { // read from rom root
 		int idx = String_IndexOf(path, '/');
 		if (idx >= 0) path_ = String_UNSAFE_SubstringAt(&path_, idx + 1);
@@ -108,6 +112,8 @@ void Platform_EncodePath(cc_filepath* dst, const cc_string* path) {
 	str += root_path.length;
 	String_EncodeUtf8(str, &path_);
 }
+
+const char* Platform_BundledMusicDir(void) { return "rom:/music/"; }
 
 void Platform_DecodePath(cc_string* dst, const cc_filepath* path) {
 	const char* str = path->buffer;
@@ -121,8 +127,12 @@ cc_result Directory_Create2(const cc_filepath* path) {
 }
 
 int File_Exists(const cc_filepath* path) {
-	struct stat sb;
-	return stat(path->buffer, &sb) == 0 && S_ISREG(sb.st_mode);
+	// NOTE: Not all of libdragon's filesystems support stat (e.g. DragonFS doesn't)
+	int fd = open(path->buffer, O_RDONLY);
+	if (fd < 0) return false;
+
+	close(fd);
+	return true;
 }
 
 cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCallback callback) {
@@ -174,6 +184,26 @@ cc_result File_OpenOrCreate(cc_file* file, const cc_filepath* path) {
 }
 
 cc_result File_Read(cc_file file, void* data, cc_uint32 count, cc_uint32* bytesRead) {
+	cc_uint8 tmp[512] __attribute__((aligned(16)));
+	cc_uint8* dst = (cc_uint8*)data;
+	int read_ = 0, n;
+
+	// ROM files are read using DMA, which needs the destination to be whole cache lines.
+	//  Otherwise memory around the destination can get corrupted when another thread
+	//  writes to it while the DMA is in progress, so read those through a temp buffer
+	if (((cc_uintptr)data | count) & 15) {
+		while (count) {
+			n = read(file, tmp, min(count, sizeof(tmp)));
+			if (n == -1) return errno;
+			if (n == 0)  break;
+
+			Mem_Copy(dst, tmp, n);
+			dst += n; read_ += n; count -= n;
+		}
+		*bytesRead = read_;
+		return 0;
+	}
+
 	*bytesRead = read(file, data, count);
 	return *bytesRead == -1 ? errno : 0;
 }
@@ -207,15 +237,24 @@ cc_result File_Length(cc_file file, cc_uint32* len) {
 /*########################################################################################################################*
 *--------------------------------------------------------Threading--------------------------------------------------------*
 *#########################################################################################################################*/
-// !!! NOTE: PSP uses cooperative multithreading (not preemptive multithreading) !!!
-void Thread_Sleep(cc_uint32 milliseconds) { 
-	wait_ms(milliseconds); 
+// NOTE: libdragon's kernel only switches threads when the running thread waits/sleeps,
+//  or when an interrupt wakes up a higher priority thread (e.g. a sleep finishing)
+
+// Sleeping is done by waiting for vertical blanks rather than with kthread_sleep, as a thread
+//  repeatedly sleeping for short periods with kthread_sleep was found to eventually never wake up
+static void WaitVBlanks(cc_uint32 milliseconds) {
+	int frames = (milliseconds * 60 + 999) / 1000;
+	kirq_wait_t wait = kirq_begin_wait_vi();
+
+	for (; frames > 0; frames--) kirq_wait(&wait);
 }
 
+void Thread_Sleep(cc_uint32 milliseconds) {
+	// VI interrupts only start once the display has been initialised
+	if (!display_get_width()) { wait_ms(milliseconds); return; }
+	WaitVBlanks(milliseconds);
+}
 
-/*########################################################################################################################*
-*--------------------------------------------------------Platform---------------------------------------------------------*
-*#########################################################################################################################*/
 // See src/n64sys.c
 static void DisableFpuExceptions(void) {
     uint32_t fcr31 = C1_FCR31();
@@ -227,6 +266,104 @@ static void DisableFpuExceptions(void) {
     C1_WRITE_FCR31(fcr31);	
 }
 
+static int ExecThread(void* param) {
+	// Each thread has its own FPU control register, which starts out as 0 for new threads
+	//  (i.e. denormals aren't flushed to zero, and cause an exception instead)
+	DisableFpuExceptions();
+	((Thread_StartFunc)param)();
+	return 0;
+}
+
+// Worker threads (e.g. music) run at a higher priority than the main thread, so that
+//  they still get to run (whenever they wake up) while the main thread is busy rendering
+#define WORKER_THREAD_PRIORITY 1
+
+void Thread_Run(void** handle, Thread_StartFunc func, int stackSize, const char* name) {
+	// Requested stack sizes are meant for desktop systems, and would waste a lot of RAM
+	stackSize = min(stackSize, 32 * 1024);
+	*handle   = kthread_new(name, stackSize, WORKER_THREAD_PRIORITY, ExecThread, (void*)func);
+	if (!*handle) Process_Abort("Creating thread");
+}
+
+void Thread_Detach(void* handle) {
+	if (handle) kthread_detach((kthread_t*)handle);
+}
+
+void Thread_Join(void* handle) {
+	if (handle) kthread_join((kthread_t*)handle);
+}
+
+void* Mutex_Create(const char* name) {
+	kmutex_t* mutex = (kmutex_t*)Mem_Alloc(1, sizeof(kmutex_t), "mutex");
+	kmutex_init(mutex, KMUTEX_STANDARD);
+	return mutex;
+}
+
+void Mutex_Free(void* handle) {
+	kmutex_destroy((kmutex_t*)handle);
+	Mem_Free(handle);
+}
+
+void Mutex_Lock(void* handle)   { kmutex_lock((kmutex_t*)handle); }
+void Mutex_Unlock(void* handle) { kmutex_unlock((kmutex_t*)handle); }
+
+struct WaitData {
+	kmutex_t mutex;
+	kcond_t  cond;
+	cc_bool  signalled;
+};
+
+void* Waitable_Create(const char* name) {
+	struct WaitData* ptr = (struct WaitData*)Mem_Alloc(1, sizeof(struct WaitData), "waitable");
+	kmutex_init(&ptr->mutex, KMUTEX_STANDARD);
+	kcond_init(&ptr->cond);
+	ptr->signalled = false;
+	return ptr;
+}
+
+void Waitable_Free(void* handle) {
+	struct WaitData* ptr = (struct WaitData*)handle;
+	kcond_destroy(&ptr->cond);
+	kmutex_destroy(&ptr->mutex);
+	Mem_Free(ptr);
+}
+
+void Waitable_Signal(void* handle) {
+	struct WaitData* ptr = (struct WaitData*)handle;
+	kmutex_lock(&ptr->mutex);
+	ptr->signalled = true;
+	kcond_signal(&ptr->cond);
+	kmutex_unlock(&ptr->mutex);
+}
+
+void Waitable_Wait(void* handle) {
+	struct WaitData* ptr = (struct WaitData*)handle;
+	kmutex_lock(&ptr->mutex);
+	while (!ptr->signalled) kcond_wait(&ptr->cond, &ptr->mutex);
+	ptr->signalled = false;
+	kmutex_unlock(&ptr->mutex);
+}
+
+void Waitable_WaitFor(void* handle, cc_uint32 milliseconds) {
+	struct WaitData* ptr = (struct WaitData*)handle;
+	// Checks every vertical blank, rather than using kcond_wait_timeout (see Thread_Sleep)
+	kirq_wait_t wait = kirq_begin_wait_vi();
+	cc_uint64 beg    = Stopwatch_Measure();
+
+	while (!ptr->signalled && Stopwatch_ElapsedMS(beg, Stopwatch_Measure()) < milliseconds)
+	{
+		kirq_wait(&wait);
+	}
+
+	kmutex_lock(&ptr->mutex);
+	ptr->signalled = false;
+	kmutex_unlock(&ptr->mutex);
+}
+
+
+/*########################################################################################################################*
+*--------------------------------------------------------Platform---------------------------------------------------------*
+*#########################################################################################################################*/
 void Platform_Init(void) {
 	debug_init_isviewer();
 	debug_init_usblog();
@@ -241,6 +378,9 @@ void Platform_Init(void) {
 		Platform_ReadonlyFilesystem = true;
 		Platform_LogConst("Couldn't access SD card.");
 	}
+
+	// NOTE: rtc_init and debug_init_sdfs hang when called after the kernel has started
+	kernel_init();
 }
 void Platform_Free(void) { }
 

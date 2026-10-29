@@ -521,7 +521,17 @@ cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** d
 	return res;
 }
 
-#ifdef CC_BUILD_BUNDLED_TEXTURES
+#if defined CC_BUILD_BUNDLED_TEXTURES && defined CC_BUNDLED_FILES_DIR
+/* ClassiCube's own textures, stored alongside the game (e.g. in the ROM) */
+cc_bool TexturePack_OpenBundled(struct Stream* stream, const cc_string* path) {
+	static const cc_string bundled = String_FromConst(CC_BUNDLED_FILES_DIR "cc_textures.zip");
+	cc_filepath raw_path;
+	if (!String_CaselessEqualsConst(path, "texpacks/classicube.zip")) return false;
+
+	Platform_EncodePath(&raw_path, &bundled);
+	return Stream_OpenPath(stream, &raw_path) == 0;
+}
+#elif defined CC_BUILD_BUNDLED_TEXTURES
 /* ClassiCube's own textures */
 CC_EMBED_FILE(ccBundledTextures, "misc/cc_textures.zip")
 
