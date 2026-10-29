@@ -1058,10 +1058,6 @@ void PhysicsComp_DoEntityPush(struct Entity* entity) {
 /*########################################################################################################################*
 *----------------------------------------------------SoundsComponent------------------------------------------------------*
 *#########################################################################################################################*/
-/* Position each local player last played a step sound at */
-/* NOTE: Must be per player, otherwise in splitscreen mode each player would keep */
-/*  triggering a step sound for the others, since they are far from each other */
-static Vec3 sounds_lastPos[MAX_LOCAL_PLAYERS];
 static cc_bool  sounds_anyNonAir;
 static cc_uint8 sounds_type;
 
@@ -1121,7 +1117,7 @@ static cc_bool SoundsComp_ShouldPlay(struct SoundsComp* comp, Vec3 soundPos) {
 	float distSq;
 	float oldLegRot, newLegRot;
 
-	Vec3_Sub(&delta, &sounds_lastPos[p->index], &soundPos);
+	Vec3_Sub(&delta, &comp->lastPos, &soundPos);
 	distSq = Vec3_LengthSquared(&delta);
 	/* just play every certain block interval when not animating */
 	if (e->Anim.Swing < 0.999f) return distSq > 1.75f * 1.75f;
@@ -1151,6 +1147,6 @@ void SoundsComp_Tick(struct SoundsComp* comp, cc_bool wasOnGround) {
 
 	if (e->OnGround && (SoundsComp_ShouldPlay(comp, pos) || !wasOnGround)) {
 		Audio_PlayStepSound(sounds_type);
-		sounds_lastPos[p->index] = soundPos;
+		comp->lastPos = pos;
 	}
 }
