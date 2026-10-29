@@ -83,6 +83,9 @@ CC_VAR extern struct _GfxData {
 	cc_uint8 ReducedPerfModeCooldown;
 	/* Default index buffer for a triangle list representing quads */
 	GfxResourceID DefaultIb;
+	/* Maximum total size in pixels a terrain atlas texture should consist of (0 = MaxTexSize) */
+	/* NOTE: Used when larger textures are supported, but are slower to draw (e.g. Nintendo 64) */
+	int MaxAtlasSize;
 } Gfx;
 
 /* Backend has no support at all for non power of two textures */

@@ -215,9 +215,24 @@ static void Audio_PlayBlockSound(void* obj, IVec3 coords, BlockID old, BlockID n
 	}
 }
 
-#ifdef CC_BUILD_BUNDLED_SOUNDS
+#if defined CC_BUILD_BUNDLED_SOUNDS && defined CC_BUNDLED_FILES_DIR
+/* ClassiCube's own sounds, stored alongside the game (e.g. in the ROM) */
+static cc_result Sounds_OpenBundled(struct Stream* stream) {
+	static const cc_string bundled = String_FromConst(CC_BUNDLED_FILES_DIR "cc_audio.zip");
+	cc_filepath raw_path;
+
+	Platform_EncodePath(&raw_path, &bundled);
+	return Stream_OpenPath(stream, &raw_path);
+}
+#elif defined CC_BUILD_BUNDLED_SOUNDS
 /* ClassiCube's own sounds */
 CC_EMBED_FILE(ccBundledSounds, "misc/cc_audio.zip")
+
+static cc_result Sounds_OpenBundled(struct Stream* stream) {
+	Stream_ReadonlyMemory(stream, (void*)ccBundledSounds,
+						(cc_uint32)(ccBundledSoundsEnd - ccBundledSounds));
+	return 0;
+}
 #endif
 
 static cc_bool SelectZipEntry(const cc_string* path) { return true; }
@@ -241,10 +256,10 @@ static cc_result Sounds_ExtractZip(const cc_string* path) {
 #ifdef CC_BUILD_BUNDLED_SOUNDS
 	/* Fall back to ClassiCube sounds built into the executable, e.g. when no network to download them */
 	if (ReturnCode_IsNotFound(res) && String_Equals(path, &Sounds_ZipPathCC)) {
-		Stream_ReadonlyMemory(&stream, (void*)ccBundledSounds,
-							(cc_uint32)(ccBundledSoundsEnd - ccBundledSounds));
-		res = 0;
+		res = Sounds_OpenBundled(&stream);
 	}
+	/* Original sounds not being downloaded is normal, as ClassiCube sounds are used instead */
+	if (ReturnCode_IsNotFound(res) && String_Equals(path, &Sounds_ZipPathMC)) return res;
 #endif
 	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
 

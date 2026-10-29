@@ -9,7 +9,14 @@
 #include "../Bitmap.h"
 #include "../Errors.h"
 #include "../ExtMath.h"
+// Default on-screen keyboard is mostly transparent, which makes it hard to read
+//  on a TV (especially with chat behind it), so use solid keys and an obvious selection
+// (key labels are drawn in black)
+#define KB_NORMAL_COLOR     BitmapCol_Make(0xB8, 0xB8, 0xB8, 0xF0)
+#define KB_SELECTED_COLOR   BitmapCol_Make(0xF0, 0xC0, 0x30, 0xFF)
+#define KB_BACKGROUND_COLOR BitmapCol_Make(0x30, 0x30, 0x30, 0xFF)
 #include "../VirtualKeyboard.h"
+#include "../VirtualDialog.h"
 #include "../Options.h"
 #include "../VirtualCursor.h"
 
@@ -18,10 +25,45 @@
 struct _DisplayData DisplayInfo;
 struct cc_window WindowInfo;
 
+// Workaround for a libdragon bug: When an interrupt handler uses the FPU, the FPU registers of
+//  the interrupted thread are first saved into its interrupt frame. However, if the interrupt
+//  also wakes up another thread, the FPU registers are saved into the frame *again* before
+//  switching threads, overwriting the correct values with what the handler left in them.
+// The display's VI handler uses the FPU, so this restores the interrupted thread's FPU registers
+//  after it has run. (VI handlers are called in the reverse order they were registered in,
+//  so this must be registered before display_init registers the display's VI handler)
+extern void* interrupt_exception_frame; // libdragon inthandler.S
+#define FRAME_FC31 "316"
+#define FRAME_FPR(i) #i "*8+320"
+
+static void RestoreFpuRegisters(void) {
+	void* frame = interrupt_exception_frame;
+	// FPU is only enabled in the interrupt handler after the FPU registers were saved
+	if (!frame || !(C0_STATUS() & C0_STATUS_CU1)) return;
+
+	__asm__ volatile(
+		"lw   $t0, " FRAME_FC31 "(%0)\n"
+		"ctc1 $t0, $31\n"
+		"ldc1 $f0,  " FRAME_FPR(0)  "(%0)\n" "ldc1 $f1,  " FRAME_FPR(1)  "(%0)\n"
+		"ldc1 $f2,  " FRAME_FPR(2)  "(%0)\n" "ldc1 $f3,  " FRAME_FPR(3)  "(%0)\n"
+		"ldc1 $f4,  " FRAME_FPR(4)  "(%0)\n" "ldc1 $f5,  " FRAME_FPR(5)  "(%0)\n"
+		"ldc1 $f6,  " FRAME_FPR(6)  "(%0)\n" "ldc1 $f7,  " FRAME_FPR(7)  "(%0)\n"
+		"ldc1 $f8,  " FRAME_FPR(8)  "(%0)\n" "ldc1 $f9,  " FRAME_FPR(9)  "(%0)\n"
+		"ldc1 $f10, " FRAME_FPR(10) "(%0)\n" "ldc1 $f11, " FRAME_FPR(11) "(%0)\n"
+		"ldc1 $f12, " FRAME_FPR(12) "(%0)\n" "ldc1 $f13, " FRAME_FPR(13) "(%0)\n"
+		"ldc1 $f14, " FRAME_FPR(14) "(%0)\n" "ldc1 $f15, " FRAME_FPR(15) "(%0)\n"
+		"ldc1 $f16, " FRAME_FPR(16) "(%0)\n" "ldc1 $f17, " FRAME_FPR(17) "(%0)\n"
+		"ldc1 $f18, " FRAME_FPR(18) "(%0)\n" "ldc1 $f19, " FRAME_FPR(19) "(%0)\n"
+		: : "r"(frame) : "t0", "memory",
+		"$f0", "$f1", "$f2",  "$f3",  "$f4",  "$f5",  "$f6",  "$f7",  "$f8",  "$f9",
+		"$f10", "$f11", "$f12", "$f13", "$f14", "$f15", "$f16", "$f17", "$f18", "$f19");
+}
+
 void Window_PreInit(void) {
 	int buffers = is_memory_expanded() ? 3 : 2;
+	register_VI_handler(RestoreFpuRegisters);
 	display_init(RESOLUTION_320x240, DEPTH_32_BPP, buffers, GAMMA_NONE, FILTERS_DISABLED);
-	//display_init(RESOLUTION_320x240, DEPTH_16_BPP, 3, GAMMA_NONE, ANTIALIAS_RESAMPLE_FETCH_ALWAYS);    
+	//display_init(RESOLUTION_320x240, DEPTH_32_BPP, 3, GAMMA_NONE, ANTIALIAS_RESAMPLE_FETCH_ALWAYS);    
 }
 
 void Window_Init(void) {
@@ -170,7 +212,8 @@ void Gamepads_Process(float delta) {
 *------------------------------------------------------Framebuffer--------------------------------------------------------*
 *#########################################################################################################################*/
 void Window_AllocFramebuffer(struct Bitmap* bmp, int width, int height) {
-	bmp->scan0  = (BitmapCol*)Mem_Alloc(width * height, BITMAPCOLOR_SIZE, "window pixels");
+	// NOTE: Can fail when out of memory (e.g. when showing an out of memory dialog)
+	bmp->scan0  = (BitmapCol*)Mem_TryAlloc(width * height, BITMAPCOLOR_SIZE);
 	bmp->width  = width;
 	bmp->height = height;
 }
@@ -180,13 +223,13 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap* bmp) {
 	cc_uint32* src = (cc_uint32*)bmp->scan0;
 	cc_uint8*  dst = (cc_uint8*)fb->buffer;
 
-	for (int y = 0; y < bmp->height; y++) 
+	for (int y = 0; y < bmp->height; y++)
 	{
 		Mem_Copy(dst + y * fb->stride,
-				 src + y * bmp->width, 
+				 src + y * bmp->width,
 				 bmp->width * 4);
 	}
-	
+
     display_show(fb);
 }
 
@@ -202,6 +245,8 @@ void OnscreenKeyboard_Open(struct OpenKeyboardArgs* args) {
 	kb_tileWidth  = KB_TILE_SIZE / 2;
 	kb_tileHeight = KB_TILE_SIZE / 2;
 	VirtualKeyboard_Open(args);
+	// Start with a key selected, so it's obvious where the D-pad cursor is
+	kb_curX = 0;
 }
 
 void OnscreenKeyboard_SetText(const cc_string* text) {
@@ -217,9 +262,13 @@ void OnscreenKeyboard_Close(void) {
 *-------------------------------------------------------Misc/Other--------------------------------------------------------*
 *#########################################################################################################################*/
 void Window_ShowDialog(const char* title, const char* msg) {
-	/* TODO implement */
-	Platform_LogConst(title);
-	Platform_LogConst(msg);
+	// A 3D frame might be in progress (e.g. maps are generated in between Gfx_BeginFrame
+	//  and Gfx_EndFrame), which must be finished before drawing directly to the display
+	cc_bool inFrame = rdpq_is_attached();
+	if (inFrame) Gfx_EndFrame();
+
+	VirtualDialog_Show(title, msg, false);
+	if (inFrame) Gfx_BeginFrame();
 }
 
 cc_result Window_OpenFileDialog(const struct OpenFileDialogArgs* args) {

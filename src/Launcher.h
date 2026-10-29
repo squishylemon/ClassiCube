@@ -70,7 +70,7 @@ void Launcher_DrawBackground(struct Context2D* ctx, int x, int y, int width, int
 /* Fills the entire contents of the given bitmap with the default background */
 /* NOTE: Also draws titlebar at top, if current screen permits it */
 void Launcher_DrawBackgroundAll(struct Context2D* ctx);
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_TEXTUREDLAUNCHER
 /* Draws a button using the button image from the texture pack's gui.png */
 /* Returns false if the texture pack has no gui.png */
 cc_bool Launcher_DrawButtonTexture(struct Context2D* ctx, int x, int y, int width, int height, cc_bool active);

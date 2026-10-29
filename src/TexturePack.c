@@ -68,14 +68,13 @@ int TexturePack_ReqID;
 
 TextureRec Atlas1D_TexRec(TextureLoc texLoc, int uCount, int* index) {
 	TextureRec rec;
-	int y  = Atlas1D_RowId(texLoc);
 	*index = Atlas1D_Index(texLoc);
 
 	/* Adjust coords to be slightly inside - fixes issues with AMD/ATI cards */	
 	rec.u1 = 0.0f; 
-	rec.v1 = y * Atlas1D.InvTileSize;
+	rec.v1 = Atlas1D_TileV(texLoc);
 	rec.u2 = (uCount - 1) + UV2_Scale;
-	rec.v2 = rec.v1       + UV2_Scale * Atlas1D.InvTileSize;
+	rec.v2 = rec.v1       + ATLAS1D_V2_SCALE * Atlas1D.InvTileSize;
 	return rec;
 }
 
@@ -148,11 +147,12 @@ static void Atlas_Convert2DTo1D(void) {
 static void Atlas_Update1D(void) {
 	int maxAtlasHeight, maxTilesPerAtlas, maxTiles;
 	int maxTexHeight = Gfx.MaxTexHeight;
+	int maxTexSize   = Gfx.MaxAtlasSize ? Gfx.MaxAtlasSize : Gfx.MaxTexSize;
 
 	/* E.g. a graphics backend may support textures up to 256 x 256 */
 	/*   dimension wise, but only have enough storage for 16 x 256 */
-	if (Gfx.MaxTexSize) {
-		int maxCurHeight = Gfx.MaxTexSize / Atlas2D.TileSize;
+	if (maxTexSize) {
+		int maxCurHeight = maxTexSize / Atlas2D.TileSize;
 		maxTexHeight     = min(maxTexHeight, maxCurHeight);
 	}
 
@@ -497,6 +497,9 @@ void TexturePack_SetDefault(const cc_string* texPack) {
 	Options_Set(OPT_DEFAULT_TEX_PACK, texPack);
 }
 
+/* Whether the default texture packs are currently being tried in turn */
+static cc_bool extractingDefault;
+
 cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** default_path) {
 	cc_result res = ReturnCode_FileNotFound;
 	const char* defaults[3];
@@ -507,21 +510,34 @@ cc_result TexturePack_ExtractDefault(DefaultZipCallback callback, const char** d
 	defaults[1] = "texpacks/default.zip";
 	defaults[2] = "texpacks/classicube.zip";
 
-	for (i = 0; i < Array_Elems(defaults); i++) 
+	extractingDefault = true;
+	for (i = 0; i < Array_Elems(defaults); i++)
 	{
 		path = String_FromReadonly(defaults[i]);
 		res  = callback(&path);
 		if (res) continue;
 
-		*default_path = defaults[i];
+		*default_path     = defaults[i];
+		extractingDefault = false;
 		return 0;
 	}
 
-	*default_path = NULL;
+	*default_path     = NULL;
+	extractingDefault = false;
 	return res;
 }
 
-#ifdef CC_BUILD_BUNDLED_TEXTURES
+#if defined CC_BUILD_BUNDLED_TEXTURES && defined CC_BUNDLED_FILES_DIR
+/* ClassiCube's own textures, stored alongside the game (e.g. in the ROM) */
+cc_bool TexturePack_OpenBundled(struct Stream* stream, const cc_string* path) {
+	static const cc_string bundled = String_FromConst(CC_BUNDLED_FILES_DIR "cc_textures.zip");
+	cc_filepath raw_path;
+	if (!String_CaselessEqualsConst(path, "texpacks/classicube.zip")) return false;
+
+	Platform_EncodePath(&raw_path, &bundled);
+	return Stream_OpenPath(stream, &raw_path) == 0;
+}
+#elif defined CC_BUILD_BUNDLED_TEXTURES
 /* ClassiCube's own textures */
 CC_EMBED_FILE(ccBundledTextures, "misc/cc_textures.zip")
 
@@ -623,6 +639,8 @@ static cc_result ExtractFromFile(const cc_string* path) {
 #ifdef CC_BUILD_BUNDLED_TEXTURES
 	if (ReturnCode_IsNotFound(res) && TexturePack_OpenBundled(&stream, path)) res = 0;
 #endif
+	/* Missing default texture packs are expected, as they are tried in turn */
+	if (res && extractingDefault && ReturnCode_IsNotFound(res)) return res;
 	if (res) { Logger_IOWarn2(res, "opening", &raw_path); return res; }
 
 	res = ExtractFrom(&stream, path);

@@ -6,12 +6,12 @@ struct _DrawerData Drawer;
 
 void Drawer_XMin(int count, PackedCol col, TextureLoc texLoc, struct VertexTextured** vertices) {
 	struct VertexTextured* v = *vertices;
-	float vOrigin = Atlas1D_RowId(texLoc) * Atlas1D.InvTileSize;
+	float vOrigin = Atlas1D_TileV(texLoc);
 
 	float u1 = Drawer.MinBB.z;
 	float u2 = (count - 1) + Drawer.MaxBB.z * UV2_Scale;
 	float v1 = vOrigin + Drawer.MaxBB.y * Atlas1D.InvTileSize;
-	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * UV2_Scale;
+	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * ATLAS1D_V2_SCALE;
 
 	float x1 = Drawer.X1;
 	float y1 = Drawer.Y1, y2 = Drawer.Y2;
@@ -28,12 +28,12 @@ void Drawer_XMin(int count, PackedCol col, TextureLoc texLoc, struct VertexTextu
 
 void Drawer_XMax(int count, PackedCol col, TextureLoc texLoc, struct VertexTextured** vertices) {
 	struct VertexTextured* v = *vertices;
-	float vOrigin = Atlas1D_RowId(texLoc) * Atlas1D.InvTileSize;
+	float vOrigin = Atlas1D_TileV(texLoc);
 
 	float u1 = (count - Drawer.MinBB.z);
 	float u2 = (1 - Drawer.MaxBB.z) * UV2_Scale;
 	float v1 = vOrigin + Drawer.MaxBB.y * Atlas1D.InvTileSize;
-	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * UV2_Scale;
+	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * ATLAS1D_V2_SCALE;
 
 	float x2 = Drawer.X2;
 	float y1 = Drawer.Y1, y2 = Drawer.Y2;
@@ -50,12 +50,12 @@ void Drawer_XMax(int count, PackedCol col, TextureLoc texLoc, struct VertexTextu
 
 void Drawer_ZMin(int count, PackedCol col, TextureLoc texLoc, struct VertexTextured** vertices) {
 	struct VertexTextured* v = *vertices;
-	float vOrigin = Atlas1D_RowId(texLoc) * Atlas1D.InvTileSize;
+	float vOrigin = Atlas1D_TileV(texLoc);
 
 	float u1 = (count - Drawer.MinBB.x);
 	float u2 = (1 - Drawer.MaxBB.x) * UV2_Scale;
 	float v1 = vOrigin + Drawer.MaxBB.y * Atlas1D.InvTileSize;
-	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * UV2_Scale;
+	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * ATLAS1D_V2_SCALE;
 
 	float x1 = Drawer.X1, x2 = Drawer.X2 + (count - 1);
 	float y1 = Drawer.Y1, y2 = Drawer.Y2;
@@ -72,12 +72,12 @@ void Drawer_ZMin(int count, PackedCol col, TextureLoc texLoc, struct VertexTextu
 
 void Drawer_ZMax(int count, PackedCol col, TextureLoc texLoc, struct VertexTextured** vertices) {
 	struct VertexTextured* v = *vertices;
-	float vOrigin = Atlas1D_RowId(texLoc) * Atlas1D.InvTileSize;
+	float vOrigin = Atlas1D_TileV(texLoc);
 
 	float u1 = Drawer.MinBB.x;
 	float u2 = (count - 1) + Drawer.MaxBB.x * UV2_Scale;
 	float v1 = vOrigin + Drawer.MaxBB.y * Atlas1D.InvTileSize;
-	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * UV2_Scale;
+	float v2 = vOrigin + Drawer.MinBB.y * Atlas1D.InvTileSize * ATLAS1D_V2_SCALE;
 
 	float x1 = Drawer.X1, x2 = Drawer.X2 + (count - 1);
 	float y1 = Drawer.Y1, y2 = Drawer.Y2;
@@ -95,11 +95,11 @@ void Drawer_ZMax(int count, PackedCol col, TextureLoc texLoc, struct VertexTextu
 void Drawer_YMin(int count, PackedCol col, TextureLoc texLoc, struct VertexTextured** vertices) {
 	struct VertexTextured* v = *vertices;
 
-	float vOrigin = Atlas1D_RowId(texLoc) * Atlas1D.InvTileSize;
+	float vOrigin = Atlas1D_TileV(texLoc);
 	float u1 = Drawer.MinBB.x;
 	float u2 = (count - 1) + Drawer.MaxBB.x * UV2_Scale;
 	float v1 = vOrigin + Drawer.MinBB.z * Atlas1D.InvTileSize;
-	float v2 = vOrigin + Drawer.MaxBB.z * Atlas1D.InvTileSize * UV2_Scale;
+	float v2 = vOrigin + Drawer.MaxBB.z * Atlas1D.InvTileSize * ATLAS1D_V2_SCALE;
 
 	float x1 = Drawer.X1, x2 = Drawer.X2 + (count - 1);
 	float y1 = Drawer.Y1;
@@ -116,12 +116,12 @@ void Drawer_YMin(int count, PackedCol col, TextureLoc texLoc, struct VertexTextu
 
 void Drawer_YMax(int count, PackedCol col, TextureLoc texLoc, struct VertexTextured** vertices) {
 	struct VertexTextured* v = *vertices;
-	float vOrigin = Atlas1D_RowId(texLoc) * Atlas1D.InvTileSize;
+	float vOrigin = Atlas1D_TileV(texLoc);
 
 	float u1 = Drawer.MinBB.x;
 	float u2 = (count - 1) + Drawer.MaxBB.x * UV2_Scale;
 	float v1 = vOrigin + Drawer.MinBB.z * Atlas1D.InvTileSize;
-	float v2 = vOrigin + Drawer.MaxBB.z * Atlas1D.InvTileSize * UV2_Scale;
+	float v2 = vOrigin + Drawer.MaxBB.z * Atlas1D.InvTileSize * ATLAS1D_V2_SCALE;
 
 	float x1 = Drawer.X1, x2 = Drawer.X2 + (count - 1);
 	float y2 = Drawer.Y2;

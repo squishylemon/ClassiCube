@@ -529,13 +529,21 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_CONSOLE
 	#define CC_BUILD_LOWMEM
 	#define CC_BUILD_COOPTHREADED
-	#define CC_BUILD_NOMUSIC
-	#define CC_BUILD_NOSOUNDS
 	#define CC_BUILD_MAXSTACK (64 * 1024)
 	#define CC_BUILD_SPLITSCREEN
+	#define CC_BUILD_COMPACTMUSIC     /* Music is stored as ADPCM, which is cheap to decode */
+	#define CC_BUILD_BUNDLED_TEXTURES /* ClassiCube textures are in the ROM, as there's no network */
+	#define CC_BUILD_BUNDLED_SOUNDS   /* Likewise for ClassiCube sounds */
+	#define CC_BUILD_BUNDLED_MUSIC    /* Free music in the ROM, so there's music without network */
+	#define CC_BUNDLED_FILES_DIR "rom:/" /* Bundled files are read from ROM, rather than taking up RAM */
+	#define CC_BUILD_TEXTUREDLAUNCHER /* Launcher uses the texture pack's background and buttons */
+	#define CC_BUILD_CONTROLLERMENUS  /* Menus are laid out to be quick to use with a controller */
+	#define CC_BUILD_NOFILEDIALOGS    /* No way to pick arbitrary files to load/save */
+	#define CC_BUILD_COMPACTMAP /* Uniform 16x16x16 chunks stored as a single block */
+	#define CC_BUILD_GROWFACES  /* Avoids cracks between faces, as RDP only has 1/4 pixel precision */
+	#define CC_BUILD_FASTLEAVES /* Faces between leaves aren't drawn, as that's a lot of geometry */
 	#undef  CC_BUILD_RESOURCES
 	#undef  CC_BUILD_NETWORKING
-	#define DEFAULT_AUD_BACKEND CC_AUD_BACKEND_NULL
 #elif defined PLAT_PS2
 	#define CC_BUILD_PS2
 	#define CC_BUILD_CONSOLE
@@ -547,6 +555,8 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_BUNDLED_SOUNDS   /* Likewise for ClassiCube sounds */
 	#define CC_BUILD_BUNDLED_MUSIC    /* Free music on the disc, so there's music without network */
 	#define CC_BUILD_CHECKNETWORK     /* Many consoles have no network adapter or cable */
+	#define CC_BUILD_TEXTUREDLAUNCHER /* Launcher uses the texture pack's background and buttons */
+	#define CC_BUILD_CONTROLLERMENUS  /* Menus are laid out to be quick to use with a controller */
 	#define CC_BUILD_COMPACTMAP /* Uniform 16x16x16 chunks stored as a single block */
 	#define CC_BUILD_GROWFACES /* Avoids cracks between faces, as GS only has 1/16 pixel precision */
 	#define CC_BUILD_FASTLEAVES /* Faces between leaves aren't drawn, as that's a lot of geometry */

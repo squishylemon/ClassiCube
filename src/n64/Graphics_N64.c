@@ -36,15 +36,16 @@ void Gfx_Create(void) {
 
     zbuffer = surface_alloc(FMT_RGBA16, display_get_width(), display_get_height());
     
-	Gfx.MaxTexWidth  = 256;
-	Gfx.MaxTexHeight = 256;
+	Gfx.MaxTexWidth  = 512;
+	Gfx.MaxTexHeight = 512;
 	Gfx.Created      = true;
 	
 	// TMEM only has 4 KB in it, which can be interpreted as
 	// - 1024 32bpp pixels
-	// - 2048 16bpp pixels 
-	Gfx.MaxTexSize       = 1024;
-	Gfx.MaxLowResTexSize = 2048;
+	// - 2048 16bpp pixels
+	// Larger textures are drawn a part at a time (see DrawLargeQuad), which is a lot slower,
+	//  so terrain atlases are kept small enough to fit in TMEM
+	Gfx.MaxAtlasSize = 1024;
 
 	Gfx.NonPowTwoTexturesSupport = GFX_NONPOW2_FULL;
 
@@ -171,15 +172,24 @@ static int CalcPalette(BitmapCol* palette, struct Bitmap* bmp, int rowWidth) {
 *#########################################################################################################################*/
 typedef struct CCTexture {
 	surface_t surface;
-	rspq_block_t* upload_block;
+	rspq_block_t* upload_block; // NULL for textures too large to fit in TMEM
 	cc_uint16 palette[MAX_PAL_4BPP_ENTRIES];
 } CCTexture;
+
+// Texture that's too large to fit in TMEM (e.g. gui.png), which is drawn a piece at a time
+static CCTexture* gfx_largeTex;
 
 void Gfx_BindTexture(GfxResourceID texId) {
 	if (!texId) texId = white_square;
 	CCTexture* tex = (CCTexture*)texId;
 
-	rspq_block_run(tex->upload_block);
+	if (tex->upload_block) {
+		gfx_largeTex = NULL;
+		rspq_block_run(tex->upload_block);
+	} else {
+		gfx_largeTex = tex;
+		rdpq_mode_tlut(TLUT_NONE);
+	}
 	gpuSetTexSize(tex->surface.width, tex->surface.height);
 }
 
@@ -209,19 +219,24 @@ static CC_INLINE int CalcTextureFormat(cc_bool bit16, int pal_count) {
 	return bit16 ? FMT_RGBA16 : FMT_RGBA32;
 }
 
+// rows are actually 8 byte aligned in TMEM https://github.com/DragonMinded/libdragon/blob/f360fa1bb1fb3ff3d98f4ab58692d40c828636c9/src/rdpq/rdpq_tex.c#L132
+// so even though width * height * pixel size may fit within 4096 bytes, after adjusting for 8 byte alignment, row pitch * height may exceed 4096 bytes
+// 32bpp textures are split into two halves of TMEM (red/green and blue/alpha), each with 16 bits per pixel
+static cc_bool FitsInTMEM(int width, int height, int bpp) {
+	if (bpp == 4) return CC_ALIGNUP(width * 2, 8) * height <= 2048;
+	return CC_ALIGNUP(width * bpp, 8) * height <= 4096;
+}
+
 GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags, cc_bool mipmaps) {
 	cc_bool bit16  = flags & TEXTURE_FLAG_LOWRES;
-	// rows are actually 8 byte aligned in TMEM https://github.com/DragonMinded/libdragon/blob/f360fa1bb1fb3ff3d98f4ab58692d40c828636c9/src/rdpq/rdpq_tex.c#L132
-	// so even though width * height * pixel size may fit within 4096 bytes, after adjusting for 8 byte alignment, row pitch * height may exceed 4096 bytes
-	int pitch = bit16 ? CC_ALIGNUP(bmp->width * 2, 8) : CC_ALIGNUP(bmp->width * 4, 8);
-	if (pitch * bmp->height > 4096) return 0;
-	
-	CCTexture* tex = Mem_TryAlloc(1, sizeof(CCTexture));
+	cc_bool large  = !FitsInTMEM(bmp->width, bmp->height, bit16 ? 2 : 4);
+
+	CCTexture* tex = Mem_TryAllocCleared(1, sizeof(CCTexture));
 	if (!tex) return NULL;
 
 	BitmapCol palette[MAX_PAL_4BPP_ENTRIES];
 	int pal_count = 0;
-	if (bit16 && !(flags & TEXTURE_FLAG_DYNAMIC))
+	if (bit16 && !large && !(flags & TEXTURE_FLAG_DYNAMIC))
 		pal_count = CalcPalette(palette, bmp, rowWidth);
 
 	tex->surface  = surface_alloc(CalcTextureFormat(bit16, pal_count), bmp->width, bmp->height);
@@ -281,7 +296,8 @@ GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags,
         .s.repeats = (flags & TEXTURE_FLAG_NONPOW2) ? 1 : REPEAT_INFINITE,
         .t.repeats = (flags & TEXTURE_FLAG_NONPOW2) ? 1 : REPEAT_INFINITE,
     };
-	UploadTexture(tex, pal_count, &params);
+	// Large textures are instead uploaded a part at a time when drawn (see DrawLargeQuad)
+	if (!large) UploadTexture(tex, pal_count, &params);
 	return tex;
 }
 
@@ -304,8 +320,10 @@ void Gfx_DeleteTexture(GfxResourceID* texId) {
 	CCTexture* tex = (CCTexture*)(*texId);
 	if (!tex) return;
 	
+	if (tex == gfx_largeTex) gfx_largeTex = NULL;
 	if (tex->upload_block) rdpq_call_deferred((void (*)(void*))rspq_block_free, tex->upload_block);
-	surface_free(&tex->surface);
+	// RDP might not have finished reading from the texture yet
+	rdpq_call_deferred(free_uncached, tex->surface.buffer);
 
 	Mem_Free(tex);
 	*texId = NULL;
@@ -540,11 +558,32 @@ void Gfx_UnlockVb(GfxResourceID vb) {
 *#########################################################################################################################*/
 static cc_bool depthOnlyRendering;
 
-void Gfx_SetFog(cc_bool enabled)         { } // TODO: implement
-static void SetFogColor(PackedCol color) { } // TODO: implement
-static void SetFogDensity(float value)   { } // TODO: implement
-static void SetFogEnd(float value)       { } // TODO: implement
-static void SetFogMode(FogFunc func)     { } // TODO: implement
+static void UpdateCombiner(void);
+
+// Fog is linear from 0 to end, calculated per vertex by the RSP and stored in vertex alpha,
+//  which the RDP then uses to blend between the pixel colour and the fog colour
+static void UpdateFog(void) {
+	float end = gfx_fogEnd;
+	// Approximate exponential fog with linear fog (see algorithm in EnvRenderer.c)
+	if (gfx_fogMode == FOG_EXP) end = -2.99573227355399f / -gfx_fogDensity;
+
+	gpuSetFog(gfx_fogEnabled, end > 0.0f ? 255.0f / end : 0.0f);
+}
+
+void Gfx_SetFog(cc_bool enabled) {
+	gfx_fogEnabled = enabled;
+	rdpq_mode_fog(enabled ? RDPQ_FOG_STANDARD : 0);
+	UpdateCombiner();
+	UpdateFog();
+}
+
+static void SetFogColor(PackedCol color) {
+	rdpq_set_fog_color(RGBA32(PackedCol_R(color), PackedCol_G(color), PackedCol_B(color), 0xFF));
+}
+
+static void SetFogDensity(float value) { UpdateFog(); }
+static void SetFogEnd(float value)     { UpdateFog(); }
+static void SetFogMode(FogFunc func)   { UpdateFog(); }
 
 void Gfx_DepthOnlyRendering(cc_bool depthOnly) {
 	depthOnlyRendering = depthOnly; // TODO: Better approach? maybe using glBlendFunc instead?
@@ -588,17 +627,25 @@ void Gfx_DisableTextureOffset(void) { }
 /*########################################################################################################################*
 *--------------------------------------------------------Rendering--------------------------------------------------------*
 *#########################################################################################################################*/
+// With fog, vertex alpha is how visible the vertex is through the fog, so it mustn't be used
+//  as the alpha of the pixel (otherwise e.g. fogged blocks would be discarded by alpha testing)
+#define COMBINER_TEX_SHADE_FOG RDPQ_COMBINER1((TEX0, 0, SHADE, 0), (0, 0, 0, TEX0))
+#define COMBINER_SHADE_FOG     RDPQ_COMBINER1((0, 0, 0, SHADE),    (0, 0, 0, 1))
+
+static void UpdateCombiner(void) {
+	if (gfx_format == VERTEX_FORMAT_TEXTURED) {
+		rdpq_mode_combiner(gfx_fogEnabled ? COMBINER_TEX_SHADE_FOG : RDPQ_COMBINER_TEX_SHADE);
+	} else {
+		rdpq_mode_combiner(gfx_fogEnabled ? COMBINER_SHADE_FOG     : RDPQ_COMBINER_SHADE);
+	}
+}
+
 void Gfx_SetVertexFormat(VertexFormat fmt) {
 	if (fmt == gfx_format) return;
 	gfx_format = fmt;
 	gfx_stride = strideSizes[fmt];
 	gpu_stride = gfx_stride;
-
-	if (fmt == VERTEX_FORMAT_TEXTURED) {
-		rdpq_mode_combiner(RDPQ_COMBINER_TEX_SHADE);
-	} else {
-		rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
-	}
+	UpdateCombiner();
 
 	gpu_texturing = fmt == VERTEX_FORMAT_TEXTURED;
 	gpu_attr_tex = gpu_texturing;
@@ -608,7 +655,152 @@ void Gfx_SetVertexFormat(VertexFormat fmt) {
 void Gfx_DrawVb_Lines(int verticesCount) {
 }
 
+
+/*########################################################################################################################*
+*-----------------------------------------------------Large textures------------------------------------------------------*
+*#########################################################################################################################*/
+// Textures that don't fit in TMEM are drawn by splitting each quad into pieces whose part of the
+//  texture does fit in TMEM, and then uploading that part of the texture before drawing each piece
+// NOTE: Only works for quads whose texture coordinates are axis aligned (e.g. GUI elements)
+
+static int LerpI(int a, int b, float t) { return a + (int)((b - a) * t); }
+
+// Bilinearly interpolates position between the four corners of a quad
+static void LerpCorners(struct rsp_vertex* dst, struct rsp_vertex* c[2][2], float fu, float fv) {
+	#define LERP_POS(comp) \
+		LerpI(LerpI((int16_t)c[0][0]->comp, (int16_t)c[1][0]->comp, fu), \
+			  LerpI((int16_t)c[0][1]->comp, (int16_t)c[1][1]->comp, fu), fv)
+
+	dst->x = LERP_POS(x);
+	dst->y = LERP_POS(y);
+	dst->z = LERP_POS(z);
+	dst->w = 0;
+}
+
+// Calculates the region of texels that a quad's texture coordinates cover
+static void CalcQuadTexels(struct rsp_vertex* v, int* s0, int* t0, int* s1, int* t1) {
+	int texW = gfx_largeTex->surface.width, texH = gfx_largeTex->surface.height;
+	int umin = (int16_t)v[0].u, umax = umin, vmin = (int16_t)v[0].v, vmax = vmin;
+
+	for (int i = 1; i < 4; i++)
+	{
+		umin = min(umin, (int16_t)v[i].u); umax = max(umax, (int16_t)v[i].u);
+		vmin = min(vmin, (int16_t)v[i].v); vmax = max(vmax, (int16_t)v[i].v);
+	}
+
+	// Texture coordinates are 1 << TEX_SHIFT for the whole texture
+	*s0 = max(0,    (umin * texW) >> TEX_SHIFT);
+	*t0 = max(0,    (vmin * texH) >> TEX_SHIFT);
+	*s1 = min(texW, (umax * texW + (1 << TEX_SHIFT) - 1) >> TEX_SHIFT);
+	*t1 = min(texH, (vmax * texH + (1 << TEX_SHIFT) - 1) >> TEX_SHIFT);
+}
+
+static void DrawLargeQuad(struct rsp_vertex* v) {
+	CCTexture* tex = gfx_largeTex;
+	int texW = tex->surface.width, texH = tex->surface.height;
+	int bpp  = TEX_FORMAT_BITDEPTH(surface_get_format(&tex->surface)) / 8;
+	struct rsp_vertex* c[2][2] = { 0 };
+	struct rsp_vertex quad[4] __attribute__((aligned(8)));
+	rdpq_texparms_t params = { 0 };
+	int umin, umax, vmin, vmax, i;
+	int s0, t0, s1, t1;
+
+	umin = umax = (int16_t)v[0].u;
+	vmin = vmax = (int16_t)v[0].v;
+	for (i = 1; i < 4; i++)
+	{
+		umin = min(umin, (int16_t)v[i].u); umax = max(umax, (int16_t)v[i].u);
+		vmin = min(vmin, (int16_t)v[i].v); vmax = max(vmax, (int16_t)v[i].v);
+	}
+	if (umin == umax || vmin == vmax) return;
+
+	// Work out which corner of the texture region each vertex is at
+	for (i = 0; i < 4; i++)
+	{
+		int cu = (int16_t)v[i].u == umax, cv = (int16_t)v[i].v == vmax;
+		if ((int16_t)v[i].u != umin && !cu) return;
+		if ((int16_t)v[i].v != vmin && !cv) return;
+		c[cu][cv] = &v[i];
+	}
+	if (!c[0][0] || !c[0][1] || !c[1][0] || !c[1][1]) return;
+
+	CalcQuadTexels(v, &s0, &t0, &s1, &t1);
+	if (s0 >= s1 || t0 >= t1) return;
+
+	// Find a size of piece that fits in TMEM
+	int pieceW = s1 - s0, pieceH = t1 - t0;
+	while (!FitsInTMEM(pieceW, pieceH, bpp))
+	{
+		if (pieceW >= pieceH) { pieceW = (pieceW + 1) / 2; } else { pieceH = (pieceH + 1) / 2; }
+	}
+
+	for (int t = t0; t < t1; t += pieceH)
+	{
+		int tEnd = min(t + pieceH, t1);
+		int va   = max(vmin, (t    << TEX_SHIFT) / texH);
+		int vb   = min(vmax, (tEnd << TEX_SHIFT) / texH);
+		float fa = (float)(va - vmin) / (vmax - vmin);
+		float fb = (float)(vb - vmin) / (vmax - vmin);
+
+		for (int s = s0; s < s1; s += pieceW)
+		{
+			int sEnd = min(s + pieceW, s1);
+			int ua   = max(umin, (s    << TEX_SHIFT) / texW);
+			int ub   = min(umax, (sEnd << TEX_SHIFT) / texW);
+			float ea = (float)(ua - umin) / (umax - umin);
+			float eb = (float)(ub - umin) / (umax - umin);
+
+			for (i = 0; i < 4; i++)
+			{
+				int cu = (int16_t)v[i].u == umax, cv = (int16_t)v[i].v == vmax;
+				LerpCorners(&quad[i], c, cu ? eb : ea, cv ? fb : fa);
+				quad[i].rgba = v[i].rgba;
+				quad[i].u    = cu ? ub : ua;
+				quad[i].v    = cv ? vb : va;
+			}
+
+			rdpq_tex_upload_sub(TILE0, &tex->surface, &params, s, t, sEnd, tEnd);
+			gpu_pointer = quad;
+			gpuDrawArrays(0, 4);
+		}
+	}
+}
+
+static void DrawLargeQuads(int startVertex, int verticesCount) {
+	struct rsp_vertex* v = (struct rsp_vertex*)gfx_vb->vertices + startVertex;
+	int bpp = TEX_FORMAT_BITDEPTH(surface_get_format(&gfx_largeTex->surface)) / 8;
+	rdpq_texparms_t params = { 0 };
+	int s0, t0, s1, t1, i = 0, j;
+
+	while (i < verticesCount)
+	{
+		CalcQuadTexels(v + i, &s0, &t0, &s1, &t1);
+		if (s0 >= s1 || t0 >= t1 || !FitsInTMEM(s1 - s0, t1 - t0, bpp)) {
+			DrawLargeQuad(v + i); i += 4; continue;
+		}
+
+		// Usually consecutive quads use nearby parts of the texture (e.g. all the faces of a
+		//  model's head), so draw as many quads as possible with a single upload to TMEM
+		for (j = i + 4; j < verticesCount; j += 4)
+		{
+			int a0, b0, a1, b1;
+			CalcQuadTexels(v + j, &a0, &b0, &a1, &b1);
+			a0 = min(a0, s0); b0 = min(b0, t0);
+			a1 = max(a1, s1); b1 = max(b1, t1);
+
+			if (a0 >= a1 || b0 >= b1 || !FitsInTMEM(a1 - a0, b1 - b0, bpp)) break;
+			s0 = a0; t0 = b0; s1 = a1; t1 = b1;
+		}
+
+		rdpq_tex_upload_sub(TILE0, &gfx_largeTex->surface, &params, s0, t0, s1, t1);
+		gpu_pointer = v;
+		gpuDrawArrays(i, j - i);
+		i = j;
+	}
+}
+
 void Gfx_DrawVb_IndexedTris_Range(int verticesCount, int startVertex, DrawHints hints) {
+	if (gfx_largeTex) { DrawLargeQuads(startVertex, verticesCount); return; }
 	rspq_block_t* block = VB_GetCached(gfx_vb, startVertex, verticesCount);
 
 	if (block) {
@@ -620,6 +812,7 @@ void Gfx_DrawVb_IndexedTris_Range(int verticesCount, int startVertex, DrawHints 
 }
 
 void Gfx_DrawVb_IndexedTris(int verticesCount) {
+	if (gfx_largeTex) { DrawLargeQuads(0, verticesCount); return; }
 	rspq_block_t* block = VB_GetCached(gfx_vb, 0, verticesCount);
 
 	if (block) {
@@ -632,6 +825,7 @@ void Gfx_DrawVb_IndexedTris(int verticesCount) {
 
 void Gfx_DrawIndexedTris_T2fC4b(int verticesCount, int startVertex, DrawHints hints) {
 	if (depthOnlyRendering) return;
+	if (gfx_largeTex) { DrawLargeQuads(startVertex, verticesCount); return; }
 	rspq_block_t* block = VB_GetCached(gfx_vb, startVertex, verticesCount);
 
 	if (block) {

@@ -2,7 +2,7 @@
 
 This is a fork of [ClassiCube](https://github.com/ClassiCube/ClassiCube), a custom Minecraft Classic compatible client written in C.
 
-This fork aims to clean up and fix ClassiCube's ports to older consoles, for both singleplayer and its multiplayer client. It starts with the **PlayStation 2**.
+This fork aims to clean up and fix ClassiCube's ports to older consoles, for both singleplayer and its multiplayer client. It starts with the **PlayStation 2** and the **Nintendo 64**.
 
 > [!NOTE]
 > This is an unofficial fork, so please report problems with the console ports here rather than to the main ClassiCube project.
@@ -101,6 +101,71 @@ This produces `ClassiCube-ps2.iso`, which boots in PCSX2 or through [Open PS2 Lo
 
 The game stores its data next to the ELF when run from a USB drive or PCSX2's host folder. Otherwise, including when booted from the disc image, it stores it on the memory card.
 
+## Nintendo 64 port status
+
+The N64 port is now in a **playable state** for singleplayer and split screen. It has been tested in [ares](https://github.com/ares-emulator/ares) v148 (with its default paraLLEl-RDP renderer and the Expansion Pak enabled) but **not yet on real hardware**. The N64 has no networking, so there's no multiplayer.
+
+#### What works
+
+* **Singleplayer**
+  * Starts in a generated (not flat) 64×64×64 map, like the PS2 port.
+  * Generate new level uses the PC's Small/Normal/Huge screen. Small (128×64×128) works; Normal and Huge need more memory than the N64 has, and show a message saying so.
+  * Maps can be saved and loaded.
+* **Split screen**
+  * 2, 3 or 4 players, each on their own controller, with their own HUD.
+* **Saving**
+  * Without an SD card, settings and maps are saved to the cartridge's 128 KB FlashRAM. A saved 64×64×64 map takes about 14 KB.
+  * With an SD card (e.g. on a flashcart), data is stored in `ClassiCube` on the SD card as before.
+* **Built-in textures, sounds and music**
+  * ClassiCube's own textures and sounds, and 7 free (CC0) tracks from OpenGameArt, are in the ROM's filesystem, so they don't take up RAM. Music is streamed from the ROM.
+* **No networking**
+  * The launcher doesn't show sign-in, servers, update checks or download prompts.
+  * Load file/Save file buttons are hidden, as there's no file browser.
+* **Rendering**
+  * Fog, so distant terrain fades out like on PC, instead of being cut off.
+  * Textures too large for the N64's 4 KB texture memory (e.g. the hotbar, menu buttons, player skins and long lines of chat) are drawn a piece at a time instead of not at all.
+  * The launcher uses the texture pack's background and buttons, like the PS2 port.
+  * Error dialogs (e.g. out of memory) are shown on screen.
+* **Performance**
+  * In ares, on a generated 64×64×64 map at the default view distance (20 blocks): 1 player runs at 59 fps, 2 players at 29 fps, 3 players at about 7 fps and 4 players at about 6 fps.
+  * Chunks hidden by fog aren't drawn, and other players' skins are uploaded to texture memory once per body part instead of once per face.
+
+#### Known limitations
+
+* 3 and 4 player split screen are slow, as the RSP has to process the whole world once per player.
+* Normal and Huge maps don't fit in the N64's 8 MB of RAM.
+* Larger saved maps may not fit in FlashRAM (saving then fails with an error).
+* Saving to the Controller Pak isn't supported.
+* Small cracks can still show between some block faces.
+* The game has only been tested with the Expansion Pak.
+* Several libdragon kernel bugs had to be worked around (see `src/n64`), and frame rates were measured in an emulator, so real hardware may behave differently.
+
+#### Controls
+
+| Button | Action |
+|---|---|
+| Control stick | Look around |
+| C buttons | Move |
+| D-pad | Navigate menus |
+| D-pad up / down | Fly up / down |
+| D-pad left / right | Speed / toggle flying |
+| A | Jump, confirm |
+| B | Inventory, back / close menu |
+| Z | Place block |
+| R | Delete block |
+| L | Next hotbar slot |
+| Start | Pause menu |
+
+#### Building
+
+Run `make n64` with the preview branch of [libdragon](https://github.com/DragonMinded/libdragon/tree/preview) installed. Alternatively, build with the libdragon Docker image:
+
+```
+docker run --rm -v "$PWD:/src" -w /src ghcr.io/n64brew/libdragon:preview sh -c "git clone -b preview --depth=1 https://github.com/n64brew/libdragon.git /tmp/libdragon && make -C /tmp/libdragon install tools-install && make n64"
+```
+
+This produces `ClassiCube-n64.z64` (about 12 MB), which can be run in ares or on an N64 with a flashcart. The ROM header asks for FlashRAM saves, which ares and most flashcarts set up automatically.
+
 ---
 
 # Original ClassiCube README
@@ -192,7 +257,7 @@ And also runs on:
 * Wii U - unfinished, major issues (can [download from here](https://www.classicube.net/download/wiiu))
 * Wii - unfinished, but usable (can [download from here](https://www.classicube.net/download/wii))
 * GameCube - unfinished, but usable (can [download from here](https://www.classicube.net/download/gamecube))
-* Nintendo 64 - unfinished, moderate rendering issues (can [download from here](https://www.classicube.net/download/n64))
+* Nintendo 64 - playable in this fork, see [Nintendo 64 port status](#nintendo-64-port-status) (upstream build can be [downloaded from here](https://www.classicube.net/download/n64))
 * 3DS - unfinished, but usable (can [download from here](https://www.classicube.net/download/3ds))
 * DS/DSi - unfinished, rendering issues  (can [download from here](https://www.classicube.net/download/nds))
 * GBA - terrible performance and practically unusable

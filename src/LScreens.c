@@ -845,7 +845,7 @@ static void MainScreen_ApplyUpdateLabel(struct MainScreen* s) {
 	}
 }
 
-#ifdef CC_BUILD_PS2
+#if defined CC_BUILD_PS2 || defined CC_BUILD_N64
 /* No Exit button, as there's nothing sensible to exit back to */
 #define MainScreen_HasExit() false
 #define MainScreen_ExitApp NULL
@@ -892,12 +892,19 @@ static void MainScreen_Activated(struct LScreen* s_) {
 	LButton_Add(s, &s->btnOptions, 100, 35, "Options", 
 				SwitchToSettings, main_btnOptions);
 
+#ifdef CC_BUILD_NETWORKING
+	#define MAIN_UPDATE_TEXT "&eChecking.."
+#else
+	/* Updates can't be checked for without networking */
+	#define MAIN_UPDATE_TEXT ""
+#endif
+
 	if (MainScreen_HasExit()) {
-		LLabel_Add(s,  &s->lblUpdate,  "&eChecking..", main_lblUpdate_N);
+		LLabel_Add(s,  &s->lblUpdate,  MAIN_UPDATE_TEXT, main_lblUpdate_N);
 		LButton_Add(s, &s->btnUpdates,  100, 35, "Exit", 
 					MainScreen_ExitApp, main_btnUpdates);
 	} else {
-		LLabel_Add(s,  &s->lblUpdate,  "&eChecking..",      
+		LLabel_Add(s,  &s->lblUpdate,  MAIN_UPDATE_TEXT,
 					Updater_Supported ? main_lblUpdate_N : main_lblUpdate_H);
 		if (Updater_Supported) {
 			LButton_Add(s, &s->btnUpdates,  100, 35, "Updates", 

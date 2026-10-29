@@ -67,6 +67,8 @@ GL_STATE:
     GL_VIEWPORT_OFFSET:     .half   0,0,0,0
     GL_STATE_TEX_SIZE:      .half   0,0, 0,0, 0,0, 0,0
     GL_STATE_TEX_OFFSET:    .half   0,0, 0,0, 0,0, 0,0
+    # Fog scale (s15.16 integer and fraction), maximum fog alpha (255), fog enabled
+    GL_FOG_PARAMS:          .half   0,0, 255,0
     GL_TRI_CMD:             .half   0
     GL_TRI_CULL:            .half   0
 
@@ -274,6 +276,36 @@ GL_TnL:
     ldv vcspos_i.e4, SCREEN_VTX_CS_POSi,vtx2
     ldv vcspos_f.e0, SCREEN_VTX_CS_POSf,vtx1
     ldv vcspos_f.e4, SCREEN_VTX_CS_POSf,vtx2
+
+    // Linear fog: replace each vertex's alpha with how visible it is through the fog,
+    //  i.e. alpha = clamp(255 - W * fog_scale, 0, 255), where 255 = not fogged at all
+    #define vfog     $v04
+    #define vfogw_i  $v05
+    #define vfogw_f  $v06
+    lhu t3, %lo(GL_FOG_PARAMS) + 6
+    beqz t3, gl_tnl_no_fog
+    li  t3, %lo(GL_FOG_PARAMS)
+    ldv vfog.e0, 0,t3
+
+    vmudl v___,    vcspos_f, vfog.e1
+    vmadm v___,    vcspos_i, vfog.e1
+    vmadn vfogw_f, vcspos_f, vfog.e0
+    vmadh vfogw_i, vcspos_i, vfog.e0
+
+    vsub vfogw_i, vfogw_i, vfog.e2
+    vsub vfogw_i, vzero,   vfogw_i
+    vge  vfogw_i, vfogw_i, vzero
+    vlt  vfogw_i, vfogw_i, vfog.e2
+
+    mfc2 t3, vfogw_i.w
+    sb   t3, SCREEN_VTX_RGBA + 3(vtx1)
+    mfc2 t3, vfogw_i.W
+    sb   t3, SCREEN_VTX_RGBA + 3(vtx2)
+gl_tnl_no_fog:
+    #undef vfog
+    #undef vfogw_i
+    #undef vfogw_f
+
 	li  t1,          0x3F
 
     // Calculate 32-bit inverse W for vertex 1

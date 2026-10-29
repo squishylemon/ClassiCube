@@ -227,7 +227,14 @@ static void Menu_SwitchHacks(void* a, void* b)     { HacksSettingsScreen_Show();
 static void Menu_SwitchEnv(void* a, void* b)       { EnvSettingsScreen_Show(); }
 static void Menu_SwitchNostalgia(void* a, void* b) { NostalgiaMenuScreen_Show(); }
 
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_NOFILEDIALOGS
+/* Buttons that would show a file dialog are left out, as file dialogs aren't supported */
+#define FileDialogAction(func) ((void)(func), (Widget_LeftClick)NULL)
+#else
+#define FileDialogAction(func) (func)
+#endif
+
+#ifdef CC_BUILD_CONTROLLERMENUS
 /* Map size is chosen with Small/Normal/Huge buttons, as typing it in with a controller is slow */
 static void Menu_SwitchGenLevel(void* a, void* b)        { ClassicGenScreen_Show(); }
 #else
@@ -407,7 +414,8 @@ static void ListScreen_Init(void* screen) {
 		s->btns[i].meta.val = i;
 	}
 	width = Input_TouchMode ? 140 : 400;
-	ButtonWidget_Add(s, &s->action, width, s->ActionClick);
+	/* No action button when e.g. it would show a file dialog, but file dialogs aren't supported */
+	if (s->ActionClick) ButtonWidget_Add(s, &s->action, width, s->ActionClick);
 
 	ButtonWidget_Add(s, &s->left,  40, ListScreen_MoveBackwards);
 	ButtonWidget_Add(s, &s->right, 40, ListScreen_MoveForwards);
@@ -445,7 +453,7 @@ static void ListScreen_ContextRecreated(void* screen) {
 	ButtonWidget_SetConst(&s->done, "Done", &s->font);
 	ListScreen_UpdatePage(s);
 
-	ButtonWidget_SetConst(&s->action, s->actionText, &s->font);
+	if (s->ActionClick) ButtonWidget_SetConst(&s->action, s->actionText, &s->font);
 }
 
 static void ListScreen_Reload(struct ListScreen* s) {
@@ -542,7 +550,7 @@ static void PauseScreen_Layout(void* screen) {
 	struct PauseScreen* s = (struct PauseScreen*)screen;
 	Menu_LayoutButtons(s->btns, s->descs, s->descsCount);
 	Menu_LayoutBack(&s->back);
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_CONTROLLERMENUS
 	/* Directly above 'Back to game', so it's easy to reach with a controller */
 	Widget_SetLocation(&s->quit,  ANCHOR_CENTRE, ANCHOR_MAX,    0,   75);
 #else
@@ -570,7 +578,7 @@ static void PauseScreen_Init(void* screen) {
 
 	s->descs      = descs;
 	s->descsCount = Array_Elems(descs);
-#ifdef CC_BUILD_PS2
+#ifdef CC_BUILD_CONTROLLERMENUS
 	/* Added before 'Back to game', as it's now above it */
 	TextWidget_Add(s,   &s->title);
 	Menu_AddButtons(s,  s->btns, 300, s->descs, s->descsCount);
@@ -1453,6 +1461,7 @@ static void SaveLevelScreen_Save(void* screen, void* widget) {
 	CPE_SendNotifyAction(NOTIFY_ACTION_LEVEL_SAVED, 0);
 }
 
+#ifndef CC_BUILD_NOFILEDIALOGS
 static void SaveLevelScreen_UploadCallback(const cc_string* path) {
 	cc_result res = SaveLevelScreen_SaveMap(path);
 	if (!res) {
@@ -1484,6 +1493,7 @@ static void SaveLevelScreen_File(void* screen, void* b) {
 		Logger_SimpleWarn(res, "showing save file dialog");
 	}
 }
+#endif
 
 static int SaveLevelScreen_KeyPress(void* screen, char keyChar) {
 	struct SaveLevelScreen* s = (struct SaveLevelScreen*)screen;
@@ -1526,9 +1536,9 @@ static void SaveLevelScreen_ContextRecreated(void* screen) {
 
 	TextInputWidget_SetFont(&s->input,                &s->textFont);
 	ButtonWidget_SetConst(&s->cancel, "Cancel",       &s->titleFont);
-#ifdef CC_BUILD_WEB
+#if defined CC_BUILD_WEB
 	ButtonWidget_SetConst(&s->file,   "Download",     &s->titleFont);
-#else
+#elif !defined CC_BUILD_NOFILEDIALOGS
 	ButtonWidget_SetConst(&s->file,   "Save file...", &s->titleFont);
 #endif
 }
@@ -1558,11 +1568,13 @@ static void SaveLevelScreen_Init(void* screen) {
 	MenuInput_Path(desc);
 	
 	ButtonWidget_Add(s, &s->save, 400, SaveLevelScreen_Save);
+#ifndef CC_BUILD_NOFILEDIALOGS
 	ButtonWidget_Add(s, &s->file, 400, SaveLevelScreen_File);
+#endif
 
 	AddPrimaryButton(s, &s->cancel, Menu_SwitchPause);
-	TextInputWidget_Add(s, &s->input, 400, &World.Name, &desc);	
-	Menu_SelectWidget((struct Screen*)s, 3); /* s->input */
+	TextInputWidget_Add(s, &s->input, 400, &World.Name, &desc);
+	Menu_SelectWidget((struct Screen*)s, s->numWidgets - 1); /* s->input */
 
 	TextWidget_Add(s, &s->desc);
 	s->input.onscreenPlaceholder = "Map name";
@@ -1663,7 +1675,7 @@ void TexturePackScreen_Show(void) {
 	s->actionText = "Load file...";
 #endif
 
-	s->ActionClick = TexturePackScreen_ActionFunc;
+	s->ActionClick = FileDialogAction(TexturePackScreen_ActionFunc);
 	s->LoadEntries = TexturePackScreen_LoadEntries;
 	s->EntryClick  = TexturePackScreen_EntryClick;
 	s->DoneClick   = Menu_SwitchPause;
@@ -1738,7 +1750,7 @@ void FontListScreen_Show(void) {
 	struct ListScreen* s = &ListScreen;
 	s->titleText   = "Select a font";
 	s->actionText  = "Load font...";
-	s->ActionClick = FontListScreen_ActionFunc;
+	s->ActionClick = FileDialogAction(FontListScreen_ActionFunc);
 
 	s->LoadEntries = FontListScreen_LoadEntries;
 	s->EntryClick  = FontListScreen_EntryClick;
@@ -1885,7 +1897,7 @@ void LoadLevelScreen_Show(void) {
 	s->actionText = "Load file...";
 #endif
 	
-	s->ActionClick = LoadLevelScreen_ActionFunc;
+	s->ActionClick = FileDialogAction(LoadLevelScreen_ActionFunc);
 	s->LoadEntries = LoadLevelScreen_LoadEntries;
 	s->EntryClick  = LoadLevelScreen_EntryClick;
 	s->DoneClick   = Menu_SwitchPause;
@@ -2547,8 +2559,8 @@ static void TexIdsOverlay_BuildTerrain(struct TexIdsOverlay* s, struct VertexTex
 			tex.x = xOffset    + Atlas2D_TileX(i) * size;
 			tex.y = s->yOffset + Atlas2D_TileY(i) * size;
 
-			tex.uv.v1 = Atlas1D_RowId(i + baseLoc) * Atlas1D.InvTileSize;
-			tex.uv.v2 = tex.uv.v1      + UV2_Scale * Atlas1D.InvTileSize;
+			tex.uv.v1 = Atlas1D_TileV(i + baseLoc);
+			tex.uv.v2 = tex.uv.v1      + ATLAS1D_V2_SCALE * Atlas1D.InvTileSize;
 			
 			Gfx_Make2DQuad(&tex, PACKEDCOL_WHITE, ptr);
 		}
