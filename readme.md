@@ -25,6 +25,7 @@ The PS2 port is now in a **playable state**. It has been tested in [PCSX2](https
   * Worlds are stored in a compact format that keeps only the parts that aren't a single block type in full.
   * A 256×256×256 world needs about 2 MB instead of 16 MB.
   * A 32 MB freebuild map loads in about 12 MB, so maps larger than the PS2's 32 MB of RAM can be played.
+  * Huge (512×64×512) maps can be generated in singleplayer. They're converted to the compact format a layer at a time, so generating one needs about 17 MB instead of 29 MB.
 * **Split screen**
   * 2, 3 or 4 players, each on their own controller.
   * 2 players are stacked top and bottom, 3 players get three columns, and 4 players get quarters.
@@ -45,7 +46,7 @@ The PS2 port is now in a **playable state**. It has been tested in [PCSX2](https
   * When memory runs low, the game reduces view distance instead of crashing.
   * Maps that are too large show a clear message.
 * **Performance**
-  * In PCSX2, a generated 256×64×256 map runs at about 30 fps while walking and flying around, with no second below 24 fps. It used to run at 7–11 fps.
+  * In PCSX2 with its most accurate settings (software renderer, no speed hacks, EE cache on), a generated 256×64×256 map averages about 33 fps while walking and flying around, with no second below 29 fps. A Huge 512×64×512 map averages about 29 fps, with no second below 24 fps. The 256×64×256 map used to run at 7–11 fps.
   * The default view distance is 48 blocks, as every vertex is transformed by the CPU. It can be raised in the options.
   * Faces between leaves aren't drawn, and chunks hidden by fog are skipped.
   * Quads that are entirely off screen are discarded early, instead of going through the slow clipping path.

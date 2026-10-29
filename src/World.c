@@ -118,13 +118,15 @@ static void Chunks_Free(void) {
 
 /* Copies count blocks starting at the given packed index into dst */
 typedef void (*FetchBlocksRow)(BlockRaw* dst, cc_uint32 index, int count);
-/* Called after all chunks up to the given packed index have been built */
+/* Called after all chunks up to (or with topDown, from) the given packed index have been built */
 typedef void (*ReleaseBlocks)(cc_uint32 index);
 
-static cc_bool Chunks_Build(FetchBlocksRow fetch, ReleaseBlocks release) {
+/* topDown builds chunks starting from the top of the map, so that the source blocks can be */
+/*  released from the end, while chunks are still being built (see ReleaseFlatRows) */
+static cc_bool Chunks_Build(FetchBlocksRow fetch, ReleaseBlocks release, cc_bool topDown) {
 	BlockRaw chunk[CHUNK_SIZE_3];
 	int cx, cy, cz, x1, y1, z1, xCount, yCount, zCount;
-	int y, z, i, j;
+	int y, z, i, j, layer;
 	BlockRaw* blocks;
 	BlockRaw fill;
 
@@ -132,8 +134,9 @@ static cc_bool Chunks_Build(FetchBlocksRow fetch, ReleaseBlocks release) {
 	World.ChunkFills  = (BlockRaw*) Mem_TryAllocCleared(World.ChunksCount, sizeof(BlockRaw));
 	if (!World.ChunkBlocks || !World.ChunkFills) { Chunks_Free(); return false; }
 
-	for (cy = 0; cy < World.ChunksY; cy++)
+	for (layer = 0; layer < World.ChunksY; layer++)
 	{
+		cy = topDown ? World.ChunksY - 1 - layer : layer;
 		y1 = cy << CHUNK_SHIFT; yCount = min(CHUNK_SIZE, World.Height - y1);
 
 		for (cz = 0; cz < World.ChunksZ; cz++)
@@ -171,7 +174,7 @@ static cc_bool Chunks_Build(FetchBlocksRow fetch, ReleaseBlocks release) {
 			}
 		}
 
-		if (release) release(World_Pack(0, y1 + yCount, 0));
+		if (release) release(World_Pack(0, topDown ? y1 : y1 + yCount, 0));
 	}
 
 	for (i = 0, j = 0; i < World.ChunksCount; i++)
@@ -400,6 +403,18 @@ static BlockRaw* flat_blocks;
 static void FetchFlatRow(BlockRaw* dst, cc_uint32 index, int count) {
 	Mem_Copy(dst, &flat_blocks[index], count);
 }
+
+/* Shrinks the blocks array to only the rows below the given index, as rows above have already */
+/*  been put into chunks. This way, a large map doesn't need memory for both all of its blocks */
+/*  and all of its chunks at the same time (e.g. 512x64x512 would need ~29 MB instead of ~17 MB) */
+static void ReleaseFlatRows(cc_uint32 index) {
+	BlockRaw* blocks;
+	if (!index) return;
+
+	/* Shrinking happens in place, so the memory at the end can be reused by chunks */
+	blocks = (BlockRaw*)Mem_TryRealloc(flat_blocks, index, 1);
+	if (blocks) flat_blocks = blocks;
+}
 #endif
 
 void World_Reset(void) {
@@ -453,10 +468,10 @@ void World_SetNewMap(BlockRaw* blocks, int width, int height, int length) {
 	World_SetDimensions(width, height, length);
 
 	flat_blocks = blocks;
-	if (World.Volume && !Chunks_Build(FetchFlatRow, NULL)) MapBuildFailed(&height);
-	flat_blocks = NULL;
+	if (World.Volume && !Chunks_Build(FetchFlatRow, ReleaseFlatRows, true)) MapBuildFailed(&height);
 
-	Mem_Free(blocks);
+	Mem_Free(flat_blocks);
+	flat_blocks = NULL;
 	World.Blocks = NULL;
 	FinishNewMap(height);
 }
@@ -467,7 +482,7 @@ void World_SetNewStagedMap(int width, int height, int length) {
 	if (!staged_segs || (cc_uint32)World.Volume != staged_volume) {
 		height = 0;
 		World_SetDimensions(0, 0, 0);
-	} else if (!CommitCurrentSegment() || !AllocDecodeCache() || !Chunks_Build(FetchStagedRow, ReleaseStagedRows)) {
+	} else if (!CommitCurrentSegment() || !AllocDecodeCache() || !Chunks_Build(FetchStagedRow, ReleaseStagedRows, false)) {
 		MapBuildFailed(&height);
 	}
 

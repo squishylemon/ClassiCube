@@ -1319,10 +1319,6 @@ static void ClassicGenScreen_Init(void* screen) {
 	ButtonWidget_Add(s, &s->btns[0], 400, ClassicGenScreen_Small);
 	ButtonWidget_Add(s, &s->btns[1], 400, ClassicGenScreen_Medium);
 	ButtonWidget_Add(s, &s->btns[2], 400, ClassicGenScreen_Huge);
-#ifdef CC_BUILD_PS2
-	/* 512x64x512 maps are too large to fit in memory */
-	s->btns[2].flags |= WIDGET_FLAG_DISABLED;
-#endif
 	AddPrimaryButton(s, &s->cancel,       Menu_SwitchPause);
 
 	s->maxVertices = Screen_CalcDefaultMaxVertices(s);
