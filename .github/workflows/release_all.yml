@@ -1,39 +1,260 @@
 name: Release all
-# Builds every platform, then attaches all their binaries to a GitHub release
+# Builds every platform, then attaches all of their binaries to a GitHub release
+# The release is created if it doesn't exist yet, otherwise its files are added/replaced
 # NOTE: Platforms that fail to build are left out, rather than stopping the release
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.3.9-ps2.1). An existing release with this tag is updated'
+        description: 'Release tag (e.g. v1.3.9-ps2.1)'
         required: true
         type: string
-      title:
-        description: 'Release title (defaults to the tag)'
-        required: false
-        type: string
-      prerelease:
-        description: 'Mark as a pre-release'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-release-all
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    uses: ./.github/workflows/build_all.yml
+  build_3ds:
+    name: 3DS
+    uses: ./.github/workflows/build_3ds.yml
     secrets: inherit
 
-  publish:
-    needs: build
+  build_android:
+    name: Android
+    uses: ./.github/workflows/build_android.yml
+    secrets: inherit
+
+  build_dreamcast:
+    name: Dreamcast
+    uses: ./.github/workflows/build_dreamcast.yml
+    secrets: inherit
+
+  build_freebsd:
+    name: FreeBSD
+    uses: ./.github/workflows/build_freebsd.yml
+    secrets: inherit
+
+  build_gba:
+    name: GBA
+    uses: ./.github/workflows/build_gba.yml
+    secrets: inherit
+
+  build_gc:
+    name: GameCube
+    uses: ./.github/workflows/build_gc.yml
+    secrets: inherit
+
+  build_haiku:
+    name: Haiku
+    uses: ./.github/workflows/build_haiku.yml
+    secrets: inherit
+
+  build_ios:
+    name: iOS
+    uses: ./.github/workflows/build_ios.yml
+    secrets: inherit
+
+  build_linux:
+    name: Linux
+    uses: ./.github/workflows/build_linux.yml
+    secrets: inherit
+
+  build_mac32:
+    name: macOS 32 bit
+    uses: ./.github/workflows/build_mac32.yml
+    secrets: inherit
+
+  build_mac64:
+    name: macOS 64 bit
+    uses: ./.github/workflows/build_mac64.yml
+    secrets: inherit
+
+  build_macclassic:
+    name: Mac Classic
+    uses: ./.github/workflows/build_macclassic.yml
+    secrets: inherit
+
+  build_msdos:
+    name: MS DOS
+    uses: ./.github/workflows/build_msdos.yml
+    secrets: inherit
+
+  build_n64:
+    name: N64
+    uses: ./.github/workflows/build_n64.yml
+    secrets: inherit
+
+  build_nds:
+    name: NDS
+    uses: ./.github/workflows/build_nds.yml
+    secrets: inherit
+
+  build_netbsd:
+    name: NetBSD
+    uses: ./.github/workflows/build_netbsd.yml
+    secrets: inherit
+
+  build_ps1:
+    name: PS1
+    uses: ./.github/workflows/build_ps1.yml
+    secrets: inherit
+
+  build_ps2:
+    name: PS2
+    uses: ./.github/workflows/build_ps2.yml
+    secrets: inherit
+
+  build_ps3:
+    name: PS3
+    uses: ./.github/workflows/build_ps3.yml
+    secrets: inherit
+
+  build_psp:
+    name: PSP
+    uses: ./.github/workflows/build_psp.yml
+    secrets: inherit
+
+  build_rpi:
+    name: RPI
+    uses: ./.github/workflows/build_rpi.yml
+    secrets: inherit
+
+  build_saturn:
+    name: Saturn
+    uses: ./.github/workflows/build_saturn.yml
+    secrets: inherit
+
+  build_switch:
+    name: Switch
+    uses: ./.github/workflows/build_switch.yml
+    secrets: inherit
+
+  build_symbian:
+    name: Symbian
+    uses: ./.github/workflows/build_symbian.yml
+    secrets: inherit
+
+  build_vita:
+    name: Vita
+    uses: ./.github/workflows/build_vita.yml
+    secrets: inherit
+
+  build_webclient:
+    name: Webclient
+    uses: ./.github/workflows/build_webclient.yml
+    secrets: inherit
+
+  build_wii:
+    name: Wii
+    uses: ./.github/workflows/build_wii.yml
+    secrets: inherit
+
+  build_wiiu:
+    name: WiiU
+    uses: ./.github/workflows/build_wiiu.yml
+    secrets: inherit
+
+  build_win_arm:
+    name: Windows ARM32/64
+    uses: ./.github/workflows/build_win-arm.yml
+    secrets: inherit
+
+  build_wince:
+    name: WinCE
+    uses: ./.github/workflows/build_wince.yml
+    secrets: inherit
+
+  build_windows:
+    name: Windows
+    uses: ./.github/workflows/build_windows.yml
+    secrets: inherit
+
+  build_xbox:
+    name: Xbox
+    uses: ./.github/workflows/build_xbox.yml
+    secrets: inherit
+
+  build_xbox360:
+    name: Xbox 360
+    uses: ./.github/workflows/build_xbox360.yml
+    secrets: inherit
+
+  release:
+    needs:
+      - build_3ds
+      - build_android
+      - build_dreamcast
+      - build_freebsd
+      - build_gba
+      - build_gc
+      - build_haiku
+      - build_ios
+      - build_linux
+      - build_mac32
+      - build_mac64
+      - build_macclassic
+      - build_msdos
+      - build_n64
+      - build_nds
+      - build_netbsd
+      - build_ps1
+      - build_ps2
+      - build_ps3
+      - build_psp
+      - build_rpi
+      - build_saturn
+      - build_switch
+      - build_symbian
+      - build_vita
+      - build_webclient
+      - build_wii
+      - build_wiiu
+      - build_win_arm
+      - build_wince
+      - build_windows
+      - build_xbox
+      - build_xbox360
     if: ${{ !cancelled() }}
-    uses: ./.github/workflows/publish_release.yml
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    with:
-      tag: ${{ inputs.tag }}
-      title: ${{ inputs.title }}
-      prerelease: ${{ inputs.prerelease }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      # Each artifact is downloaded into its own folder, named after the artifact
+      # Single files are attached using that name, folders are attached as a .zip
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            count=$(find "$dir" -type f | wc -l)
+
+            if [ "$count" -eq 1 ]; then
+              cp "$(find "$dir" -type f)" "release/$name"
+            elif [ "$count" -gt 1 ]; then
+              (cd "$dir" && zip -qr "$OLDPWD/release/$name.zip" .)
+            fi
+          done
+
+          if [ -z "$(ls release)" ]; then
+            echo "::error::No build artifacts to release"
+            exit 1
+          fi
+          ls -l release
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi

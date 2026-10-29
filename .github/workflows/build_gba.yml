@@ -1,5 +1,5 @@
 name: Build latest (GBA)
-# run manually, or from the build/release console and build/release all workflows
+# run manually, or from the release all workflow
 on:
   workflow_call:
   workflow_dispatch:
