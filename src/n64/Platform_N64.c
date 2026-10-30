@@ -90,6 +90,49 @@ void DateTime_CurrentLocal(struct cc_datetime* t) {
 
 
 /*########################################################################################################################*
+*--------------------------------------------------------PI access--------------------------------------------------------*
+*#########################################################################################################################*/
+// Workaround for a libdragon bug: When the kernel is running, waiting for the PI to become idle
+//  is done by waiting for a PI interrupt. But unlike DMA transfers, a CPU write to a cartridge
+//  register (e.g. FlashRAM commands, or the SummerCart64's SD card and USB registers) doesn't
+//  raise one when it's finished, so the next PI access or DMA transfer can end up waiting forever
+//  (On real hardware the write takes a few microseconds, so this happens nearly every time)
+// So all io_read/io_write calls are redirected here (see --wrap in misc/n64/Makefile), which
+//  makes sure the PI is always idle again when they return
+uint32_t __real_io_read(pi_addr_t pi_address);
+void __real_io_write(pi_addr_t pi_address, uint32_t data);
+
+// Waits until no DMA transfers are queued or in progress, then disables interrupts
+static void PI_BeginAccess(void) {
+	for (;;)
+	{
+		dma_wait();
+		disable_interrupts();
+		if (!dma_busy()) return;
+		enable_interrupts();
+	}
+}
+
+static void PI_EndAccess(void) {
+	while (*PI_STATUS & (PI_STATUS_DMA_BUSY | PI_STATUS_IO_BUSY)) { }
+	enable_interrupts();
+}
+
+uint32_t __wrap_io_read(pi_addr_t pi_address) {
+	PI_BeginAccess();
+	uint32_t value = __real_io_read(pi_address);
+	PI_EndAccess();
+	return value;
+}
+
+void __wrap_io_write(pi_addr_t pi_address, uint32_t data) {
+	PI_BeginAccess();
+	__real_io_write(pi_address, data);
+	PI_EndAccess();
+}
+
+
+/*########################################################################################################################*
 *-----------------------------------------------------Save filesystem-----------------------------------------------------*
 *#########################################################################################################################*/
 // Without an SD card, game data (e.g. options and maps) is stored in the cartridge's FlashRAM instead.
@@ -146,7 +189,6 @@ static void SaveFS_Init(void) {
 	save_hasFlash = flashram_init(NULL, NULL);
 	if (save_hasFlash) flashram_read(save_image, 0, SAVE_SIZE);
 	if (!save_hasFlash) Platform_LogConst("No FlashRAM, so data won't be saved");
-	// Kernel isn't running yet, so this polls until the PI is idle (see SaveFS_WriteFlash)
 	dma_wait();
 
 	if (!SaveFS_IsValid(SaveFS_Header())) {
@@ -241,21 +283,9 @@ static cc_result SaveFS_Write(struct SaveHandle* h, const void* data, cc_uint32 
 	return 0;
 }
 
-// Workaround for a libdragon bug: When the kernel is running, waiting for the PI to finish is done
-//  by waiting for a PI interrupt. However, writing a FlashRAM command (unlike DMA) doesn't raise
-//  one when finished, so the next command can end up waiting forever. So pretend the kernel isn't
-//  running while writing, which makes libdragon instead poll the PI until it's finished.
-// (other threads don't run in the meantime, and are woken up again by later interrupts)
-// NOTE: The PI must also be idle afterwards, as otherwise e.g. the next ROM read would hang too
-extern bool __kernel;
-
 static int SaveFS_WriteFlash(cc_uint32 len) {
-	__kernel = false;
 	// NOTE: FlashRAM writes must be an even number of bytes
-	int ret  = flashram_write(save_image, 0, CC_ALIGNUP(len, 2));
-	dma_wait();
-	__kernel = true;
-	return ret;
+	return flashram_write(save_image, 0, CC_ALIGNUP(len, 2));
 }
 
 // Replaces the file's contents in the save image, and then writes that to FlashRAM

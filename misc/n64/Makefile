@@ -28,6 +28,9 @@ $(BUILD_DIR)/%.o: src/%.c
 
 include $(N64_INST)/include/n64.mk
 
+# Works around libdragon hanging on real hardware when accessing cartridge registers (see Platform_N64.c)
+LDFLAGS += --wrap=io_read --wrap=io_write
+
 $(TARGET).z64: N64_ROM_TITLE = "ClassiCube"
 $(TARGET).z64: $(BUILD_DIR)/filesystem.dfs
 
