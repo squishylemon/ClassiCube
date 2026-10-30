@@ -30,6 +30,9 @@ include $(N64_INST)/include/n64.mk
 
 # Works around libdragon hanging on real hardware when accessing cartridge registers (see Platform_N64.c)
 LDFLAGS += --wrap=io_read --wrap=io_write
+# The code is loaded entirely into RAM (of which there's only 4 MB without the Expansion Pak),
+#  so optimise for size, and don't fill in every uninitialised local variable either
+$(TARGET).z64: CFLAGS += -Os -ftrivial-auto-var-init=uninitialized
 
 $(TARGET).z64: N64_ROM_TITLE = "ClassiCube"
 $(TARGET).z64: $(BUILD_DIR)/filesystem.dfs
@@ -37,12 +40,18 @@ $(TARGET).z64: $(BUILD_DIR)/filesystem.dfs
 # ClassiCube's own textures and sounds, and the free music, are stored in the ROM filesystem
 #  (rather than in the executable, which is loaded entirely into RAM)
 MUSIC_FILES	:= $(wildcard misc/music/*.wav)
-ROMFS_FILES	:= $(N64_MKDFS_ROOT)/cc_textures.zip $(N64_MKDFS_ROOT)/cc_audio.zip \
+ROMFS_FILES	:= $(N64_MKDFS_ROOT)/cc_textures.zip $(BUILD_DIR)/sounds.extracted \
 			   $(patsubst misc/music/music%.wav,$(N64_MKDFS_ROOT)/music/MUSIC%.WAV,$(MUSIC_FILES))
 
 $(N64_MKDFS_ROOT)/%.zip: misc/%.zip
 	@mkdir -p $(dir $@)
 	cp $< $@
+
+# Sounds are stored uncompressed, so they can be played directly from the ROM (see Audio_N64.c)
+$(BUILD_DIR)/sounds.extracted: misc/cc_audio.zip
+	@mkdir -p $(N64_MKDFS_ROOT)/sounds
+	python3 -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" $< $(N64_MKDFS_ROOT)/sounds
+	touch $@
 
 $(N64_MKDFS_ROOT)/music/MUSIC%.WAV: misc/music/music%.wav
 	@mkdir -p $(dir $@)

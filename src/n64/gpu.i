@@ -37,6 +37,7 @@ enum {
     GPU_CMD_MATRIX_LOAD      = 0x4,
 
 	GPU_CMD_PUSH_RDP         = 0x5,
+    GPU_CMD_DRAW_QUADS       = 0x6,
 };
 
 typedef struct {
@@ -239,6 +240,14 @@ static void gpuDrawArrays(uint32_t first, uint32_t count)
 		}
     	rspq_write_end(&s);
     }
+}
+
+// Draws quads whose vertices the RSP reads directly from RDRAM, instead of the vertices being
+//  copied into the command queue (so the vertices must not change until they've been drawn)
+static void gpuDrawQuadsFrom(void* vertices, uint32_t first, uint32_t count)
+{
+	uint32_t addr = PhysicalAddr(vertices) + first * sizeof(struct rsp_vertex);
+	rspq_write(gpup_id, GPU_CMD_DRAW_QUADS, count / 4, addr);
 }
 
 static void gpuViewport(int x, int y, int w, int h)

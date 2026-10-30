@@ -72,6 +72,9 @@ cc_result Platform_GetEntropy(void* data, int len);
 /* Whether button in the launcher should be available to exit the app */
 /*  (e.g. necessary in MS DOS, game consoles ) */
 #define PLAT_FLAG_APP_EXIT       0x02
+/* Whether memory is very limited, so some resources should use less memory (at a lower quality) */
+/*  (e.g. Nintendo 64 without the Expansion Pak) */
+#define PLAT_FLAG_LOW_MEMORY     0x04
 
 /* Platform specific runtime behaviour flags (See PLAT_FLAG members) */
 extern cc_uint8 Platform_Flags;

@@ -13,6 +13,7 @@
 #include "Utils.h"
 #include "Options.h"
 #include "Deflate.h"
+#include "Platform.h"
 #ifdef CC_BUILD_MOBILE
 /* TODO: Refactor maybe to not rely on checking WinInfo.Handle != NULL */
 #include "Window.h"
@@ -402,17 +403,20 @@ static cc_result Music_Buffer(struct AudioChunk* chunk, int maxSamples, Music_De
 /* Plays audio from the given decoder, until either the end of the audio is reached or music is stopped */
 /* frameSamples is the maximum number of samples that a single decoded frame can contain */
 static cc_result Music_Stream(int channels, int sampleRate, int frameSamples, Music_DecodeFrame decode, void* obj) {
-	int volume, chunkSize, samplesPerSecond;
+	int volume, chunkSize, samplesPerChunk;
 	struct AudioChunk chunks[AUDIO_MAX_BUFFERS] = { 0 };
 	int inUse, i, cur;
 	cc_result res;
 
 	if ((res = StreamContext_SetFormat(&music_ctx, channels, sampleRate, 100))) return res;
 
+	samplesPerChunk = channels * sampleRate;
+	/* When memory is very limited, only buffer a quarter of a second of audio per chunk */
+	if (Platform_Flags & PLAT_FLAG_LOW_MEMORY) samplesPerChunk /= 4;
+
 	/* the last frame can end up going over, */
-	/*  so can end up decoding slightly over a second of audio */
-	chunkSize        = channels * sampleRate + frameSamples;
-	samplesPerSecond = channels * sampleRate;
+	/*  so can end up decoding slightly over a chunk of audio */
+	chunkSize = samplesPerChunk + frameSamples;
 
 	if ((res = Audio_AllocChunks(chunkSize * 2, chunks, AUDIO_MAX_BUFFERS))) goto cleanup;
     volume = Audio_MusicVolume;
@@ -421,7 +425,7 @@ static cc_result Music_Stream(int channels, int sampleRate, int frameSamples, Mu
 	/* fill up with some samples before playing */
 	for (i = 0; i < AUDIO_MAX_BUFFERS && !res; i++) 
 	{
-		res = Music_Buffer(&chunks[i], samplesPerSecond, decode, obj);
+		res = Music_Buffer(&chunks[i], samplesPerChunk, decode, obj);
 	}
 	if (music_stopping) goto cleanup;
 
@@ -453,7 +457,7 @@ static cc_result Music_Stream(int channels, int sampleRate, int frameSamples, Mu
 			Thread_Sleep(10); continue;
 		}
 
-		res = Music_Buffer(&chunks[cur], samplesPerSecond, decode, obj);
+		res = Music_Buffer(&chunks[cur], samplesPerChunk, decode, obj);
 		cur = (cur + 1) % AUDIO_MAX_BUFFERS;
 
 		/* need to specially handle last bit of audio */

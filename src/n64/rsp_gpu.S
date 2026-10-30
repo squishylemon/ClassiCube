@@ -52,6 +52,7 @@
         RSPQ_DefineCommand GPUCmd_MatrixLoad,    68  # 0x4
 
         RSPQ_DefineCommand GPUCmd_PushRDP,       12  # 0x5
+        RSPQ_DefineCommand GPUCmd_DrawQuads,     8   # 0x6
     RSPQ_EndOverlayHeader
 
     .align 4
@@ -86,6 +87,19 @@ VERTEX_CACHE:   .ds.b      SCREEN_VTX_SIZE * 4
 // Enough for all 10 triangle commands in worse case quad clipped scenario
 TRI_CMD_BUFFER: .ds.b      (MAX_TRI_CMD_SIZE * 10)
 
+// Vertices of quads read from RDRAM by GPUCmd_DrawQuads (64 bytes per quad)
+#define DRAW_QUADS_BATCH 4
+	.align 3
+QUAD_BUFFER:    .ds.b      (64 * DRAW_QUADS_BATCH)
+
+	.align 2
+QUAD_RET:       .ds.b      4 // Where DrawQuad returns to once the quad has been drawn
+DRAW_RET:       .ds.b      4 // Where GPUCmd_DrawQuads returns to once all quads have been drawn
+DRAW_ADDR:      .ds.b      4 // RDRAM address of the next batch of quads
+DRAW_LEFT:      .ds.b      4 // Number of quads left to read from RDRAM
+DRAW_BATCH:     .ds.b      4 // Number of quads left to draw in the current batch
+DRAW_NEXT:      .ds.b      4 // DMEM address of the next quad in the current batch
+
 
 .text
 
@@ -110,6 +124,67 @@ GPUCmd_SetLong:
     sw a2, %lo(GL_STATE) + 4(a0)
     jr ra
     sw a1, %lo(GL_STATE) + 0(a0)
+    .endfunc
+
+
+    ################################################################
+    # GPUCmd_DrawQuads - Draws quads, whose vertices are read from RDRAM
+    #  a0 = number of quads (in the lower 24 bits)
+    #  a1 = RDRAM address of the vertices
+    ################################################################
+    .func GPUCmd_DrawQuads
+GPUCmd_DrawQuads:
+    sll a0, 8
+    srl a0, 8 // Remove command ID
+    sw  a0, %lo(DRAW_LEFT)
+    sw  a1, %lo(DRAW_ADDR)
+    sw  ra, %lo(DRAW_RET)
+
+DrawQuads_NextBatch:
+    lw   t3, %lo(DRAW_LEFT)
+    beqz t3, DrawQuads_End
+    lw   s0, %lo(DRAW_ADDR)
+
+    // t3 = number of quads in this batch
+    sltiu t0, t3, DRAW_QUADS_BATCH
+    bnez  t0, DrawQuads_HaveCount
+    nop
+    li    t3, DRAW_QUADS_BATCH
+DrawQuads_HaveCount:
+    lw  t1, %lo(DRAW_LEFT)
+    sub t1, t3
+    sw  t1, %lo(DRAW_LEFT)
+    sw  t3, %lo(DRAW_BATCH)
+
+    sll t1, t3, 6 // 64 bytes per quad
+    add t0, s0, t1
+    sw  t0, %lo(DRAW_ADDR)
+
+    // Read this batch of quads into DMEM
+    addi t0, t1, -1 // DMA_SIZE(bytes, 1)
+    jal DMAIn
+    li  s4, %lo(QUAD_BUFFER)
+
+    li t0, %lo(QUAD_BUFFER)
+    sw t0, %lo(DRAW_NEXT)
+
+DrawQuads_NextQuad:
+    lw   t3, %lo(DRAW_BATCH)
+    beqz t3, DrawQuads_NextBatch
+    addi t3, -1
+    sw   t3, %lo(DRAW_BATCH)
+
+    lw   v1, %lo(DRAW_NEXT)
+    addi t0, v1, 64
+    jal  DrawQuad
+    sw   t0, %lo(DRAW_NEXT)
+    j    DrawQuads_NextQuad
+    nop
+
+DrawQuads_End:
+    lw ra, %lo(DRAW_RET)
+    jr ra
+    nop
     .endfunc
 
 
@@ -415,7 +490,12 @@ GPUCmd_DrawQuad:
 	#define v3_cflags   t4
 	// t5 is used by GL_ClipTriangle
 
+    // The quad's vertices are in the command itself
     addi src_ptr, rspq_dmem_buf_ptr, %lo(RSPQ_DMEM_BUFFER) - 64
+
+    // Draws the quad whose vertices are at src_ptr, then returns to ra
+DrawQuad:
+    sw ra, %lo(QUAD_RET)
     li vtx_ptr,   %lo(VERTEX_CACHE)
     li mtx_ptr,   %lo(GPU_MATRIX_MVP)
 
@@ -659,7 +739,7 @@ gl_draw_triangle_end:
     jal RDPQ_Triangle_Send_End
     nop 
 
-    j RSPQ_Loop
+    j DrawQuad_Return
     nop
 .endfunc
 
@@ -688,7 +768,9 @@ DrawQuadForRDP:
 
 RDPQ_Triangle_Cull:
 RDPQ_Triangle_Clip:
-	j RSPQ_Loop
+DrawQuad_Return:
+	lw ra, %lo(QUAD_RET)
+	jr ra
 	nop
 .endfunc
 

@@ -11,6 +11,7 @@
 #include "ExtMath.h"
 #include "Options.h"
 #include "Logger.h"
+#include "Platform.h"
 
 /* Disables when no hardware FPU, as lava/water animations are FPU heavy and thus costly */
 #if CC_BUILD_FPU_MODE >= CC_FPU_MODE_NORMAL
@@ -360,12 +361,24 @@ static cc_bool Animations_Tick(struct ScheduledTask2* task) {
 /*########################################################################################################################*
 *--------------------------------------------------Animations component---------------------------------------------------*
 *#########################################################################################################################*/
+/* When memory is very limited, the texture pack's animations are ignored (as animations.png */
+/*  is kept in memory), so water and lava use the built-in animations instead */
+#define Animations_IgnorePack() (Platform_Flags & PLAT_FLAG_LOW_MEMORY)
+
 static void AnimationsPngProcess(struct Stream* stream, const cc_string* name) {
-	cc_result res = Png_Decode(&anims_bmp, stream);
+	cc_result res;
+	if (Animations_IgnorePack()) return;
+
+	res = Png_Decode(&anims_bmp, stream);
 	if (res) Logger_SysWarn2(res, "decoding", name);
 }
+
+static void AnimationsTxtProcess(struct Stream* stream, const cc_string* name) {
+	if (Animations_IgnorePack()) return;
+	Animations_ReadDescription(stream, name);
+}
 static struct TextureEntry animations_entry = { "animations.png", AnimationsPngProcess };
-static struct TextureEntry animations_txt   = { "animations.txt", Animations_ReadDescription };
+static struct TextureEntry animations_txt   = { "animations.txt", AnimationsTxtProcess };
 
 static void UseWaterProcess(struct Stream* stream, const cc_string* name) {
 	useWaterAnim    = true;

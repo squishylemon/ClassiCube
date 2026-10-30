@@ -60,9 +60,10 @@ static void RestoreFpuRegisters(void) {
 }
 
 void Window_PreInit(void) {
-	int buffers = is_memory_expanded() ? 3 : 2;
+	// Without the Expansion Pak there's only 4 MB of RAM, so use 16 bit framebuffers to save memory
+	cc_bool expanded = is_memory_expanded();
 	register_VI_handler(RestoreFpuRegisters);
-	display_init(RESOLUTION_320x240, DEPTH_32_BPP, buffers, GAMMA_NONE, FILTERS_DISABLED);
+	display_init(RESOLUTION_320x240, expanded ? DEPTH_32_BPP : DEPTH_16_BPP, expanded ? 3 : 2, GAMMA_NONE, FILTERS_DISABLED);
 	//display_init(RESOLUTION_320x240, DEPTH_32_BPP, 3, GAMMA_NONE, ANTIALIAS_RESAMPLE_FETCH_ALWAYS);    
 }
 
@@ -223,11 +224,26 @@ void Window_DrawFramebuffer(Rect2D r, struct Bitmap* bmp) {
 	cc_uint32* src = (cc_uint32*)bmp->scan0;
 	cc_uint8*  dst = (cc_uint8*)fb->buffer;
 
-	for (int y = 0; y < bmp->height; y++)
-	{
-		Mem_Copy(dst + y * fb->stride,
-				 src + y * bmp->width,
-				 bmp->width * 4);
+	if (surface_get_format(fb) == FMT_RGBA16) {
+		// 16 bpp requires reducing R8G8B8A8 to R5G5B5A1
+		for (int y = 0; y < bmp->height; y++)
+		{
+			cc_uint32* src_row = src + y * bmp->width;
+			cc_uint16* dst_row = (cc_uint16*)(dst + y * fb->stride);
+
+			for (int x = 0; x < bmp->width; x++)
+			{
+				cc_uint32 c = src_row[x];
+				dst_row[x]  = ((c >> 16) & 0xF800) | ((c >> 13) & 0x07C0) | ((c >> 10) & 0x003E) | 1;
+			}
+		}
+	} else {
+		for (int y = 0; y < bmp->height; y++)
+		{
+			Mem_Copy(dst + y * fb->stride,
+					 src + y * bmp->width,
+					 bmp->width * 4);
+		}
 	}
 
     display_show(fb);

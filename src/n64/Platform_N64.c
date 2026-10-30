@@ -679,6 +679,8 @@ void Platform_Init(void) {
 	debug_init_isviewer();
 	debug_init_usblog();
 	DisableFpuExceptions();
+	// Without the Expansion Pak there's only 4 MB of RAM
+	if (!is_memory_expanded()) Platform_Flags |= PLAT_FLAG_LOW_MEMORY;
 	
 	dfs_init(DFS_DEFAULT_LOCATION);
 	timer_init();

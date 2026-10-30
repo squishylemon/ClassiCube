@@ -533,8 +533,8 @@ typedef cc_uint8  cc_bool;
 	#define CC_BUILD_SPLITSCREEN
 	#define CC_BUILD_COMPACTMUSIC     /* Music is stored as ADPCM, which is cheap to decode */
 	#define CC_BUILD_BUNDLED_TEXTURES /* ClassiCube textures are in the ROM, as there's no network */
-	#define CC_BUILD_BUNDLED_SOUNDS   /* Likewise for ClassiCube sounds */
 	#define CC_BUILD_BUNDLED_MUSIC    /* Free music in the ROM, so there's music without network */
+	/* NOTE: ClassiCube sounds are in the ROM too, but played directly from there (see Audio_N64.c) */
 	#define CC_BUNDLED_FILES_DIR "rom:/" /* Bundled files are read from ROM, rather than taking up RAM */
 	#define CC_BUILD_TEXTUREDLAUNCHER /* Launcher uses the texture pack's background and buttons */
 	#define CC_BUILD_CONTROLLERMENUS  /* Menus are laid out to be quick to use with a controller */

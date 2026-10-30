@@ -1,4 +1,3 @@
-#define CC_DYNAMIC_VBS_ARE_STATIC
 #define CC_SCRATCH_VBS_ARE_DYNAMIC
 #include "../_GraphicsBase.h"
 #include "../Errors.h"
@@ -227,8 +226,24 @@ static cc_bool FitsInTMEM(int width, int height, int bpp) {
 	return CC_ALIGNUP(width * bpp, 8) * height <= 4096;
 }
 
+static cc_bool HasTranslucentPixels(struct Bitmap* bmp, int rowWidth) {
+	for (int y = 0; y < bmp->height; y++)
+	{
+		cc_uint32* row = (cc_uint32*)bmp->scan0 + y * rowWidth;
+		for (int x = 0; x < bmp->width; x++)
+		{
+			cc_uint8 a = row[x] & 0xFF;
+			if (a != 0x00 && a != 0xFF) return true;
+		}
+	}
+	return false;
+}
+
 GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags, cc_bool mipmaps) {
-	cc_bool bit16  = flags & TEXTURE_FLAG_LOWRES;
+	cc_bool lowres = flags & TEXTURE_FLAG_LOWRES;
+	// Without the Expansion Pak there's only 4 MB of RAM, so textures are stored as 16 bpp
+	//  to halve how much memory they use (unless they need more than 1 bit of alpha)
+	cc_bool bit16  = lowres || (!is_memory_expanded() && !HasTranslucentPixels(bmp, rowWidth));
 	cc_bool large  = !FitsInTMEM(bmp->width, bmp->height, bit16 ? 2 : 4);
 
 	CCTexture* tex = Mem_TryAllocCleared(1, sizeof(CCTexture));
@@ -236,11 +251,12 @@ GfxResourceID Gfx_AllocTexture(struct Bitmap* bmp, int rowWidth, cc_uint8 flags,
 
 	BitmapCol palette[MAX_PAL_4BPP_ENTRIES];
 	int pal_count = 0;
-	if (bit16 && !large && !(flags & TEXTURE_FLAG_DYNAMIC))
+	if (lowres && !large && !(flags & TEXTURE_FLAG_DYNAMIC))
 		pal_count = CalcPalette(palette, bmp, rowWidth);
 
 	tex->surface  = surface_alloc(CalcTextureFormat(bit16, pal_count), bmp->width, bmp->height);
 	surface_t* fb = &tex->surface;
+	if (!fb->buffer) { Mem_Free(tex); return NULL; }
 
 	cc_uint32* src = (cc_uint32*)bmp->scan0;
 	cc_uint8*  dst = (cc_uint8*)fb->buffer;
@@ -306,9 +322,25 @@ void Gfx_UpdateTexture(GfxResourceID texId, int x, int y, struct Bitmap* part, i
 	surface_t* fb  = &tex->surface;
 
 	cc_uint32* src = (cc_uint32*)part->scan0 + x;
-	cc_uint8*  dst = (cc_uint8*)fb->buffer  + (x * 4) + (y * fb->stride);
 
-	for (int srcY = 0; srcY < part->height; srcY++) 
+	if (surface_get_format(fb) == FMT_RGBA16) {
+		cc_uint8* dst = (cc_uint8*)fb->buffer + (x * 2) + (y * fb->stride);
+
+		for (int srcY = 0; srcY < part->height; srcY++)
+		{
+			cc_uint32* src_row = src + srcY * rowWidth;
+			cc_uint16* dst_row = (cc_uint16*)(dst + srcY * fb->stride);
+
+			for (int srcX = 0; srcX < part->width; srcX++)
+			{
+				dst_row[srcX] = To16BitPixel(src_row[srcX]);
+			}
+		}
+		return;
+	}
+	cc_uint8* dst = (cc_uint8*)fb->buffer + (x * 4) + (y * fb->stride);
+
+	for (int srcY = 0; srcY < part->height; srcY++)
 	{
 		Mem_Copy(dst + srcY * fb->stride,
 				 src + srcY * rowWidth,
@@ -453,7 +485,15 @@ struct VertexBufferCache {
 	rspq_block_t* blocks[MAX_CACHED_CALLS];
 	int offset[MAX_CACHED_CALLS];
 	int counts[MAX_CACHED_CALLS];
-};
+	// RSP vertices are smaller than textured vertices, so static textured vertex buffers are shrunk
+	//  once their vertices have been converted (see Gfx_UnlockVb), and locking them again
+	//  afterwards instead uses a temporary buffer (which is then converted into the vertex buffer)
+	cc_bool dynamic, shrunk;
+	// Whether the RSP might still read this static vertex buffer's vertices (see DrawQuads)
+	cc_bool drawn;
+	int capacity;
+	void* lockBuffer;
+} __attribute__((aligned(16)));
 struct VertexBuffer {
 	struct VertexBufferCache cache;
 	char vertices[];
@@ -471,7 +511,9 @@ static void VB_ClearCache(struct VertexBuffer* vb) {
 		// TODO is this really safe ??
 		rdpq_call_deferred((void (*)(void*))rspq_block_free, block);
 	}
-	 Mem_Set(&vb->cache, 0, sizeof(vb->cache));
+	Mem_Set(vb->cache.blocks, 0, sizeof(vb->cache.blocks));
+	Mem_Set(vb->cache.offset, 0, sizeof(vb->cache.offset));
+	Mem_Set(vb->cache.counts, 0, sizeof(vb->cache.counts));
 }
 
 static rspq_block_t* VB_GetCached(struct VertexBuffer* vb, int offset, int count) {
@@ -515,7 +557,10 @@ void Gfx_DeleteIb(GfxResourceID* ib) { }
 
 static GfxResourceID Gfx_AllocStaticVb(VertexFormat fmt, int count) {
 	struct VertexBuffer* vb = memalign(16, sizeof(struct VertexBufferCache) + count * strideSizes[fmt]);
-	if (vb) Mem_Set(&vb->cache, 0, sizeof(vb->cache));
+	if (!vb) return NULL;
+
+	Mem_Set(&vb->cache, 0, sizeof(vb->cache));
+	vb->cache.capacity = count;
 	return vb;
 }
 
@@ -533,24 +578,61 @@ void Gfx_DeleteVb(GfxResourceID* vb) {
 	*vb = NULL;
 }
 
-void* Gfx_LockVb(GfxResourceID vb, VertexFormat fmt, int count) {
-	vb_count = count;
+void* Gfx_LockVb(GfxResourceID vb_, VertexFormat fmt, int count) {
+	struct VertexBuffer* vb = (struct VertexBuffer*)vb_;
+	vb_count = min(count, vb->cache.capacity);
 	vb_fmt   = fmt;
-	return ((struct VertexBuffer*)vb)->vertices;
+	// RSP might still need to draw the current vertices
+	if (vb->cache.drawn) { rspq_wait(); vb->cache.drawn = false; }
+	if (!vb->cache.shrunk) return vb->vertices;
+
+	vb->cache.lockBuffer = Mem_Alloc(count, strideSizes[fmt], "locking vertex buffer");
+	return vb->cache.lockBuffer;
 }
 
-void Gfx_UnlockVb(GfxResourceID vb) {
+void Gfx_UnlockVb(GfxResourceID vb_) {
+	struct VertexBuffer* vb = (struct VertexBuffer*)vb_;
 	VB_ClearCache(vb); // data may have changed
 
-	void* ptr = ((struct VertexBuffer*)vb)->vertices;
+	void* ptr = vb->cache.lockBuffer ? vb->cache.lockBuffer : vb->vertices;
 	if (vb_fmt == VERTEX_FORMAT_COLOURED) {
 		convert_coloured_vertices(ptr, vb_count);
-		CPU_FlushDataCache(ptr, vb_count * sizeof(struct rsp_vertex));
 	} else {
 		convert_textured_vertices(ptr, vb_count);
-		CPU_FlushDataCache(ptr, vb_count * sizeof(struct rsp_vertex));
 	}
+
+	if (vb->cache.lockBuffer) {
+		Mem_Copy(vb->vertices, ptr, vb_count * sizeof(struct rsp_vertex));
+		Mem_Free(vb->cache.lockBuffer);
+		vb->cache.lockBuffer = NULL;
+	}
+	CPU_FlushDataCache(vb->vertices, vb_count * sizeof(struct rsp_vertex));
+
+	if (vb->cache.dynamic || vb->cache.shrunk || vb_fmt != VERTEX_FORMAT_TEXTURED) return;
+	vb->cache.shrunk   = true;
+	vb->cache.capacity = vb_count;
+
+	// NOTE: newlib's realloc always shrinks memory in place (i.e. it stays at the same address)
+	uintptr_t addr = (uintptr_t)vb;
+	void* shrunk   = realloc(vb, sizeof(struct VertexBufferCache) + vb_count * sizeof(struct rsp_vertex));
+	if ((uintptr_t)shrunk != addr) Process_Abort("Vertex buffer moved when shrinking");
 }
+
+static GfxResourceID Gfx_AllocDynamicVb(VertexFormat fmt, int maxVertices) {
+	struct VertexBuffer* vb = Gfx_AllocStaticVb(fmt, maxVertices);
+	if (vb) vb->cache.dynamic = true;
+	return vb;
+}
+
+void Gfx_BindDynamicVb(GfxResourceID vb) { Gfx_BindVb(vb); }
+
+void* Gfx_LockDynamicVb(GfxResourceID vb, VertexFormat fmt, int count) {
+	return Gfx_LockVb(vb, fmt, count);
+}
+
+void Gfx_UnlockDynamicVb(GfxResourceID vb)  { Gfx_UnlockVb(vb); Gfx_BindVb(vb); }
+
+void Gfx_DeleteDynamicVb(GfxResourceID* vb) { Gfx_DeleteVb(vb); }
 
 
 /*########################################################################################################################*
@@ -799,8 +881,16 @@ static void DrawLargeQuads(int startVertex, int verticesCount) {
 	}
 }
 
-void Gfx_DrawVb_IndexedTris_Range(int verticesCount, int startVertex, DrawHints hints) {
+static void DrawQuads(int startVertex, int verticesCount) {
 	if (gfx_largeTex) { DrawLargeQuads(startVertex, verticesCount); return; }
+
+	// Static vertex buffers don't change, so the RSP can just read their vertices directly
+	//  (which avoids copying them into the command queue, or keeping copies of them in blocks)
+	if (!gfx_vb->cache.dynamic) {
+		gfx_vb->cache.drawn = true;
+		gpuDrawQuadsFrom(gfx_vb->vertices, startVertex, verticesCount);
+		return;
+	}
 	rspq_block_t* block = VB_GetCached(gfx_vb, startVertex, verticesCount);
 
 	if (block) {
@@ -809,30 +899,20 @@ void Gfx_DrawVb_IndexedTris_Range(int verticesCount, int startVertex, DrawHints 
 		gpu_pointer = gfx_vb->vertices;
 		gpuDrawArrays(startVertex, verticesCount);
 	}
+}
+
+void Gfx_DrawVb_IndexedTris_Range(int verticesCount, int startVertex, DrawHints hints) {
+	if (!gfx_vb) return; // e.g. failed to allocate vertex buffer due to running out of memory
+	DrawQuads(startVertex, verticesCount);
 }
 
 void Gfx_DrawVb_IndexedTris(int verticesCount) {
-	if (gfx_largeTex) { DrawLargeQuads(0, verticesCount); return; }
-	rspq_block_t* block = VB_GetCached(gfx_vb, 0, verticesCount);
-
-	if (block) {
-		rspq_block_run(block);
-	} else {
-		gpu_pointer = gfx_vb->vertices;
-		gpuDrawArrays(0, verticesCount);
-	}
+	if (!gfx_vb) return;
+	DrawQuads(0, verticesCount);
 }
 
 void Gfx_DrawIndexedTris_T2fC4b(int verticesCount, int startVertex, DrawHints hints) {
-	if (depthOnlyRendering) return;
-	if (gfx_largeTex) { DrawLargeQuads(startVertex, verticesCount); return; }
-	rspq_block_t* block = VB_GetCached(gfx_vb, startVertex, verticesCount);
-
-	if (block) {
-		rspq_block_run(block);
-	} else {
-		gpu_pointer = gfx_vb->vertices;
-		gpuDrawArrays(startVertex, verticesCount);
-	}
+	if (depthOnlyRendering || !gfx_vb) return;
+	DrawQuads(startVertex, verticesCount);
 }
 

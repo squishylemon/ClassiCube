@@ -2,6 +2,8 @@
 #include "../Funcs.h"
 #include "../Platform.h"
 #include "../Errors.h"
+#include "../Utils.h"
+#include <stdio.h>
 #include <libdragon.h>
 
 // All the audio contexts are mixed together in software on a separate thread, and then sent to the AI
@@ -23,6 +25,7 @@ struct AudioContext {
 	cc_uint32 pos, step; // 16.16 fixed point, in frames
 	struct AudioBuffer bufs[AUDIO_MAX_BUFFERS];
 };
+#define AUDIO_OVERRIDE_SOUNDS
 #include "../_AudioBase.h"
 
 static struct AudioContext* active_ctxs[MAX_CONTEXTS];
@@ -39,55 +42,112 @@ static void Mixer_Unlock(void) { kmutex_unlock(&mix_lock); }
 /*########################################################################################################################*
 *---------------------------------------------------------Mixing----------------------------------------------------------*
 *#########################################################################################################################*/
-static void MixContext(struct AudioContext* ctx, cc_int32* dst, int frames) {
+// Sounds are stored uncompressed in the ROM filesystem, and played directly from there (see
+//  AudioBackend_LoadSounds), so that they don't use up any RAM. For such sounds, the samples
+//  pointer is the ROM address of the samples (which are below 0x80000000, unlike RAM addresses)
+#define IsRomSamples(samples) ((cc_uintptr)(samples) < 0x80000000)
+// Number of sample frames that can be read from ROM at once (enough for 256 output frames,
+//  even when resampling a sound that's played at up to 4 times the output frequency)
+#define ROM_MIX_FRAMES 256
+#define ROM_BUF_FRAMES (ROM_MIX_FRAMES * 4 + 2)
+static cc_int16 rom_buf[ROM_BUF_FRAMES * 2] __attribute__((aligned(16)));
+
+// Reads the given range of sample frames from ROM into rom_buf
+static void ReadRomSamples(struct AudioBuffer* buf, int channels, cc_uint32 first, cc_uint32 count) {
+	cc_uint32 offset = first * channels * 2;
+	cc_uint32 size   = count  * channels * 2;
+
+	// NOTE: DMA doesn't go through the CPU's data cache
+	data_cache_hit_writeback_invalidate(rom_buf, CC_ALIGNUP(size, 16));
+	dma_read(rom_buf, (cc_uintptr)buf->samples + offset, size);
+
+	// WAV samples are little endian
+	Utils_SwapEndian16(rom_buf, count * channels);
+}
+
+// Mixes up to the given number of frames from the samples in src, which start at the given
+//  frame of the buffer, and returns how many frames were mixed
+static int MixFrames(struct AudioContext* ctx, struct AudioBuffer* buf, const cc_int16* src, cc_uint32 base,
+					cc_int32* dst, int frames) {
 	int vol = ctx->volume * 256 / 100;
+	cc_uint32 total = buf->frames << 16;
+	cc_uint32 last  = buf->frames - 1;
+	int mixed = 0;
+
+	if (ctx->step == (1 << 16) && ctx->channels == 1) {
+		// Fast path for sounds that are already at the output frequency
+		cc_uint32 f = ctx->pos >> 16;
+		for (; mixed < frames && f < buf->frames; mixed++, dst += 2, f++)
+		{
+			int s = (src[f - base] * vol) >> 8;
+			dst[0] += s;
+			dst[1] += s;
+		}
+		ctx->pos = f << 16;
+	} else if (ctx->channels == 2) {
+		// Linear interpolation resampling to output frequency
+		// (nearest neighbour sounds harsh when upsampling low sample rate music)
+		for (; mixed < frames && ctx->pos < total; mixed++, dst += 2, ctx->pos += ctx->step)
+		{
+			cc_uint32 f = ctx->pos >> 16;
+			int frac = (ctx->pos & 0xFFFF) >> 1;
+			int i = (f - base) * 2, j = ((f < last ? f + 1 : f) - base) * 2;
+
+			int l = src[i + 0] + (((src[j + 0] - src[i + 0]) * frac) >> 15);
+			int r = src[i + 1] + (((src[j + 1] - src[i + 1]) * frac) >> 15);
+			dst[0] += (l * vol) >> 8;
+			dst[1] += (r * vol) >> 8;
+		}
+	} else {
+		for (; mixed < frames && ctx->pos < total; mixed++, dst += 2, ctx->pos += ctx->step)
+		{
+			cc_uint32 f = ctx->pos >> 16;
+			int frac = (ctx->pos & 0xFFFF) >> 1;
+			int i = f - base, j = (f < last ? f + 1 : f) - base;
+
+			int s = src[i] + (((src[j] - src[i]) * frac) >> 15);
+			s = (s * vol) >> 8;
+			dst[0] += s;
+			dst[1] += s;
+		}
+	}
+	return mixed;
+}
+
+static void MixContext(struct AudioContext* ctx, cc_int32* dst, int frames) {
 	if (!ctx->playing) return;
 
 	while (frames > 0 && ctx->queued)
 	{
 		struct AudioBuffer* buf = &ctx->bufs[ctx->head];
-		cc_int16* src   = buf->samples;
 		cc_uint32 total = buf->frames << 16;
-		cc_uint32 last  = buf->frames - 1;
+		int mixed;
 
-		if (ctx->step == (1 << 16) && ctx->channels == 1) {
-			// Fast path for sounds that are already at the output frequency
-			cc_uint32 f = ctx->pos >> 16;
-			for (; frames > 0 && f < buf->frames; frames--, dst += 2, f++)
-			{
-				int s = (src[f] * vol) >> 8;
-				dst[0] += s;
-				dst[1] += s;
-			}
-			ctx->pos = f << 16;
-		} else if (ctx->channels == 2) {
-			// Linear interpolation resampling to output frequency
-			// (nearest neighbour sounds harsh when upsampling low sample rate music)
-			for (; frames > 0 && ctx->pos < total; frames--, dst += 2, ctx->pos += ctx->step)
-			{
-				cc_uint32 f = ctx->pos >> 16;
-				int frac = (ctx->pos & 0xFFFF) >> 1;
-				int i = f * 2, j = (f < last ? f + 1 : f) * 2;
+		if (IsRomSamples(buf->samples)) {
+			// Only read the samples that will be needed for the next few output frames
+			int count = min(frames, ROM_MIX_FRAMES);
+			cc_uint32 first = ctx->pos >> 16;
+			cc_uint32 end   = (cc_uint32)((ctx->pos + (cc_uint64)ctx->step * count) >> 16) + 2;
 
-				int l = src[i + 0] + (((src[j + 0] - src[i + 0]) * frac) >> 15);
-				int r = src[i + 1] + (((src[j + 1] - src[i + 1]) * frac) >> 15);
-				dst[0] += (l * vol) >> 8;
-				dst[1] += (r * vol) >> 8;
+			if (end > first + ROM_BUF_FRAMES) {
+				// Playing at a very high frequency, so mix fewer frames to stay within the samples read
+				end   = first + ROM_BUF_FRAMES;
+				count = max(1, (int)(((cc_uint64)(ROM_BUF_FRAMES - 2) << 16) / ctx->step));
 			}
+			end = min(end, buf->frames);
+
+			ReadRomSamples(buf, ctx->channels, first, end - first);
+			mixed = MixFrames(ctx, buf, rom_buf, first, dst, count);
 		} else {
-			for (; frames > 0 && ctx->pos < total; frames--, dst += 2, ctx->pos += ctx->step)
-			{
-				cc_uint32 f = ctx->pos >> 16;
-				int frac = (ctx->pos & 0xFFFF) >> 1;
-				int j = f < last ? f + 1 : f;
-
-				int s = src[f] + (((src[j] - src[f]) * frac) >> 15);
-				s = (s * vol) >> 8;
-				dst[0] += s;
-				dst[1] += s;
-			}
+			mixed = MixFrames(ctx, buf, buf->samples, 0, dst, frames);
 		}
-		if (ctx->pos < total) break;
+
+		dst    += mixed * 2;
+		frames -= mixed;
+		if (ctx->pos < total) {
+			if (mixed) continue;
+			break;
+		}
 
 		// Finished this buffer, move onto next one
 		ctx->pos    -= total;
@@ -319,4 +379,78 @@ cc_result SoundContext_PollBusy(struct AudioContext* ctx, cc_bool* isBusy) {
 *#########################################################################################################################*/
 cc_bool Audio_DescribeError(cc_result res, cc_string* dst) {
 	return false;
+}
+
+
+/*########################################################################################################################*
+*---------------------------------------------------------Sounds----------------------------------------------------------*
+*#########################################################################################################################*/
+static cc_uint8 wav_hdr[16] __attribute__((aligned(16)));
+
+static void ReadWavHeader(pi_addr_t addr, int size) {
+	// NOTE: DMA doesn't go through the CPU's data cache
+	data_cache_hit_writeback_invalidate(wav_hdr, sizeof(wav_hdr));
+	dma_read(wav_hdr, addr, size);
+}
+
+// Finds the format and samples of a .wav file in the ROM filesystem, and adds it to the group
+static cc_bool LoadRomSound(struct SoundGroup* group, const char* path) {
+	pi_addr_t rom    = dfs_rom_addr(path);
+	cc_uint32 len    = dfs_rom_size(path);
+	cc_uint32 offset = 12; // skip RIFF header
+	int channels = 0, sampleRate = 0, bitsPerSample = 0;
+	if (!rom || group->count == AUDIO_MAX_SOUNDS) return false;
+
+	while (offset + 8 <= len)
+	{
+		ReadWavHeader(rom + offset, 8);
+		cc_uint32 fourCC = Mem_ReadU32_BE(wav_hdr);
+		cc_uint32 size   = Mem_ReadU32_LE(wav_hdr + 4);
+		offset += 8;
+
+		if (fourCC == 0x666D7420) { // "fmt "
+			ReadWavHeader(rom + offset, 16);
+			channels      = Mem_ReadU16_LE(wav_hdr + 2);
+			sampleRate    = Mem_ReadU32_LE(wav_hdr + 4);
+			bitsPerSample = Mem_ReadU16_LE(wav_hdr + 14);
+		} else if (fourCC == 0x64617461) { // "data"
+			if (bitsPerSample != 16 || channels < 1 || channels > 2 || !sampleRate) return false;
+
+			struct Sound* snd = &group->sounds[group->count++];
+			snd->channels   = channels;
+			snd->sampleRate = sampleRate;
+			snd->chunk.data = (void*)(cc_uintptr)(rom + offset);
+			snd->chunk.size = min(size, len - offset);
+			return true;
+		}
+		offset += size + (size & 1);
+	}
+	return false;
+}
+
+static void LoadRomSounds(struct Soundboard* board, const char* boardName) {
+	char path[64];
+
+	for (int type = SOUND_NONE + 1; type < SOUND_COUNT; type++)
+	{
+		for (int i = 1; i <= AUDIO_MAX_SOUNDS; i++)
+		{
+			snprintf(path, sizeof(path), "sounds/%s_%s%i.wav", boardName, Sound_Names[type], i);
+			if (!LoadRomSound(&board->groups[type], path)) break;
+		}
+	}
+}
+
+void AudioBackend_LoadSounds(void) {
+	cc_filepath mcPath, ccPath;
+	Platform_EncodePath(&mcPath, &Sounds_ZipPathMC);
+	Platform_EncodePath(&ccPath, &Sounds_ZipPathCC);
+
+	// Sounds put on the SD card take priority over ClassiCube's sounds in the ROM
+	if (File_Exists(&mcPath) || File_Exists(&ccPath)) {
+		Sounds_LoadDefault();
+	} else {
+		LoadRomSounds(&digBoard,  "dig");
+		LoadRomSounds(&stepBoard, "step");
+	}
 }

@@ -19,6 +19,8 @@
 #include "Particle.h"
 #include "Options.h"
 #include "Entity.h"
+#include "Stream.h"
+#include "Bitmap.h"
 
 cc_bool EnvRenderer_Legacy, EnvRenderer_Minimal;
 
@@ -376,6 +378,72 @@ void EnvRenderer_RenderSkybox(void) {
 *#########################################################################################################################*/
 cc_int16* Weather_Heightmap;
 static GfxResourceID rain_tex, snow_tex, weather_vb;
+
+/* When memory is very limited, rain.png and snow.png are only decoded into textures while it's */
+/*  actually raining or snowing (as they're rarely needed, but use a lot of memory once decoded), */
+/*  and also at a lower resolution and quality */
+struct WeatherPng { cc_uint8* data; cc_uint32 len; };
+static struct WeatherPng rain_png, snow_png;
+#define Weather_IsLazy() (Platform_Flags & PLAT_FLAG_LOW_MEMORY)
+
+static void WeatherPng_Store(struct WeatherPng* png, struct Stream* stream) {
+	cc_uint32 capacity = 0, read;
+	cc_uint8* data;
+	cc_result res;
+
+	Mem_Free(png->data);
+	png->data = NULL;
+	png->len  = 0;
+
+	for (;;) {
+		if (png->len == capacity) {
+			capacity += 2048;
+			data = (cc_uint8*)Mem_TryRealloc(png->data, capacity, 1);
+			if (!data) break;
+			png->data = data;
+		}
+
+		res = stream->Read(stream, png->data + png->len, capacity - png->len, &read);
+		if (res || !read) break;
+		png->len += read;
+	}
+}
+
+static void WeatherPng_Free(struct WeatherPng* png) {
+	Mem_Free(png->data);
+	png->data = NULL;
+	png->len  = 0;
+}
+
+static void WeatherPng_Decode(struct WeatherPng* png, GfxResourceID* tex, const char* file) {
+	cc_string name = String_FromReadonly(file);
+	struct Stream stream;
+	struct Bitmap bmp;
+	int x, y, width, height;
+	cc_result res;
+	if (*tex || !png->data) return;
+
+	Stream_ReadonlyMemory(&stream, png->data, png->len);
+	res = Png_Decode(&bmp, &stream);
+	if (res) { Logger_SysWarn2(res, "decoding", &name); return; }
+
+	/* Halve the resolution (in place, as each pixel is moved to the same or an earlier index) */
+	width  = max(1, bmp.width  / 2);
+	height = max(1, bmp.height / 2);
+	for (y = 0; y < height; y++) 
+	{
+		for (x = 0; x < width; x++) 
+		{
+			bmp.scan0[y * width + x] = Bitmap_GetPixel(&bmp, x * 2, y * 2);
+		}
+	}
+	bmp.width  = width;
+	bmp.height = height;
+
+	if (Game_ValidateBitmap(&name, &bmp))
+		Gfx_RecreateTexture(tex, &bmp, TEXTURE_FLAG_MANAGED | TEXTURE_FLAG_LOWRES, false);
+	Mem_Free(bmp.scan0);
+}
 static float weather_accumulator;
 static IVec3 lastPos;
 
@@ -518,7 +586,13 @@ void EnvRenderer_RenderWeather(float delta) {
 		}
 	}
 
-	Gfx_BindTexture(weather == WEATHER_RAINY ? rain_tex : snow_tex);
+	if (weather == WEATHER_RAINY) {
+		WeatherPng_Decode(&rain_png, &rain_tex, "rain.png");
+		Gfx_BindTexture(rain_tex);
+	} else {
+		WeatherPng_Decode(&snow_png, &snow_tex, "snow.png");
+		Gfx_BindTexture(snow_tex);
+	}
 	if (particles) weather_accumulator = 0;
 	if (!numCoords) return;
 
@@ -848,12 +922,22 @@ static void SkyboxPngProcess(struct Stream* stream, const cc_string* name) {
 static struct TextureEntry skybox_entry = { "skybox.png", SkyboxPngProcess };
 
 static void SnowPngProcess(struct Stream* stream, const cc_string* name) {
-	Game_UpdateTexture(&snow_tex, stream, name, NULL, NULL);
+	if (Weather_IsLazy()) {
+		Gfx_DeleteTexture(&snow_tex);
+		WeatherPng_Store(&snow_png, stream);
+	} else {
+		Game_UpdateTexture(&snow_tex, stream, name, NULL, NULL);
+	}
 }
 static struct TextureEntry snow_entry = { "snow.png", SnowPngProcess };
 
 static void RainPngProcess(struct Stream* stream, const cc_string* name) {
-	Game_UpdateTexture(&rain_tex, stream, name, NULL, NULL);
+	if (Weather_IsLazy()) {
+		Gfx_DeleteTexture(&rain_tex);
+		WeatherPng_Store(&rain_png, stream);
+	} else {
+		Game_UpdateTexture(&rain_tex, stream, name, NULL, NULL);
+	}
 }
 static struct TextureEntry rain_entry = { "rain.png", RainPngProcess };
 
@@ -955,6 +1039,10 @@ static void OnEnvVariableChanged(void* obj, int envVar) {
 		DeleteCloudsVB();
 	} else if (envVar == ENV_VAR_SKYBOX_COLOR) {
 		DeleteSkyboxVB();
+	} else if (envVar == ENV_VAR_WEATHER && Weather_IsLazy()) {
+		/* Free the weather textures again until they're next needed */
+		if (Env.Weather != WEATHER_RAINY) Gfx_DeleteTexture(&rain_tex);
+		if (Env.Weather != WEATHER_SNOWY) Gfx_DeleteTexture(&snow_tex);
 	}
 }
 
@@ -992,6 +1080,9 @@ static void OnFree(void) {
 	OnContextLost(NULL);
 	Mem_Free(Weather_Heightmap);
 	Weather_Heightmap = NULL;
+
+	WeatherPng_Free(&rain_png);
+	WeatherPng_Free(&snow_png);
 }
 
 static void OnReset(void) {

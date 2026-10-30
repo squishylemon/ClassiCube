@@ -80,8 +80,14 @@ void Inflate_Process(struct InflateState* s);
 CC_API void Inflate_MakeStream2(struct Stream* stream, struct InflateState* state, struct Stream* underlying);
 
 
+#ifdef CC_BUILD_N64
+/* Only 4 MB of RAM without the Expansion Pak, so use a smaller window (at the cost of compression) */
+#define DEFLATE_BLOCK_SIZE  4096
+#define DEFLATE_BUFFER_SIZE 8192
+#else
 #define DEFLATE_BLOCK_SIZE  16384
 #define DEFLATE_BUFFER_SIZE 32768
+#endif
 #define DEFLATE_OUT_SIZE 8192
 #define DEFLATE_HASH_SIZE 0x1000UL
 #define DEFLATE_HASH_MASK 0x0FFFUL

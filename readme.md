@@ -103,7 +103,7 @@ The game stores its data next to the ELF when run from a USB drive or PCSX2's ho
 
 ## Nintendo 64 port status
 
-The N64 port is now in a **playable state** for singleplayer and split screen. It has been tested in [ares](https://github.com/ares-emulator/ares) v148 (with its default paraLLEl-RDP renderer and the Expansion Pak enabled) but **not yet on real hardware**. The N64 has no networking, so there's no multiplayer.
+The N64 port is now in a **playable state** for singleplayer and split screen. It has been tested in [ares](https://github.com/ares-emulator/ares) v148 (with its default paraLLEl-RDP renderer, with and without the Expansion Pak) but **not yet on real hardware**. The N64 has no networking, so there's no multiplayer.
 
 #### What works
 
@@ -117,7 +117,10 @@ The N64 port is now in a **playable state** for singleplayer and split screen. I
   * Without an SD card, settings and maps are saved to the cartridge's 128 KB FlashRAM. A saved 64×64×64 map takes about 14 KB.
   * With an SD card (e.g. on a flashcart), data is stored in `ClassiCube` on the SD card as before.
 * **Built-in textures, sounds and music**
-  * ClassiCube's own textures and sounds, and 7 free (CC0) tracks from OpenGameArt, are in the ROM's filesystem, so they don't take up RAM. Music is streamed from the ROM.
+  * ClassiCube's own textures and sounds, and 7 free (CC0) tracks from OpenGameArt, are in the ROM's filesystem, so they don't take up RAM. Music is streamed from the ROM, and sound effects are played directly from it.
+* **Without the Expansion Pak** (4 MB of RAM)
+  * The game still runs, with sound effects and music, but uses less memory at a lower quality: 16-bit framebuffers, 16-bit textures (except ones that need smooth transparency, like water), shorter music buffers, rain/snow textures only loaded at half resolution while it's raining or snowing, and the built-in water/lava animations instead of the texture pack's ones.
+  * With the Expansion Pak, everything is at full quality as before.
 * **No networking**
   * The launcher doesn't show sign-in, servers, update checks or download prompts.
   * Load file/Save file buttons are hidden, as there's no file browser.
@@ -129,15 +132,16 @@ The N64 port is now in a **playable state** for singleplayer and split screen. I
 * **Performance**
   * In ares, on a generated 64×64×64 map at the default view distance (20 blocks): 1 player runs at 59 fps, 2 players at 29 fps, 3 players at about 7 fps and 4 players at about 6 fps.
   * Chunks hidden by fog aren't drawn, and other players' skins are uploaded to texture memory once per body part instead of once per face.
+  * The RSP reads chunk vertices directly from RAM, instead of them being copied into its command queue (which also uses much less memory).
 
 #### Known limitations
 
 * 3 and 4 player split screen are slow, as the RSP has to process the whole world once per player.
-* Normal and Huge maps don't fit in the N64's 8 MB of RAM.
+* Normal and Huge maps don't fit in the N64's 8 MB of RAM. Without the Expansion Pak, only the default 64�64�64 map fits.
 * Larger saved maps may not fit in FlashRAM (saving then fails with an error).
 * Saving to the Controller Pak isn't supported.
 * Small cracks can still show between some block faces.
-* The game has only been tested with the Expansion Pak.
+* Without the Expansion Pak, there isn't much spare memory, so complex maps or menus can still run out of memory.
 * Several libdragon kernel bugs had to be worked around (see `src/n64`), and frame rates were measured in an emulator, so real hardware may behave differently.
 
 #### Controls
@@ -164,7 +168,7 @@ Run `make n64` with the preview branch of [libdragon](https://github.com/DragonM
 docker run --rm -v "$PWD:/src" -w /src ghcr.io/n64brew/libdragon:preview sh -c "git clone -b preview --depth=1 https://github.com/n64brew/libdragon.git /tmp/libdragon && make -C /tmp/libdragon install tools-install && make n64"
 ```
 
-This produces `ClassiCube-n64.z64` (about 12 MB), which can be run in ares or on an N64 with a flashcart. The ROM header asks for FlashRAM saves, which ares and most flashcarts set up automatically.
+Building also needs `python3` (included in the Docker image), which extracts the sounds into the ROM filesystem. This produces `ClassiCube-n64.z64` (about 12 MB), which can be run in ares or on an N64 with a flashcart. The ROM header asks for FlashRAM saves, which ares and most flashcarts set up automatically.
 
 ---
 
